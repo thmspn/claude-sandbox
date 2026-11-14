@@ -43,3 +43,4 @@ jobs:
             --model opus
             --max-turns 25
             --allowedTools "Bash(gh pr merge*),Bash(python3*)"
+            --dangerously-skip-permissions
