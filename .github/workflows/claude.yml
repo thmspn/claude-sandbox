@@ -42,4 +42,4 @@ jobs:
           claude_args: |
             --model sonnet
             --max-turns 15
-            --allowedTools "Bash(gh pr merge*)"
+            --allowedTools "Bash(gh pr merge*),Bash(python3*)"
