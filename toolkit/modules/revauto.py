@@ -675,7 +675,7 @@ def _detect_lang(text: str) -> tuple[str, str]:
     if "eval(function(p,a,c,k,e," in head:
         sc["js"] += 10
     for pat in (r"^\s*(?:if \[|fi$|then$|do$|done$|esac$)", r"\$\(", r"\$\{\w+", r"\|\s*(?:ba)?sh\b",
-                r"^\s*(?:echo|export|chmod|curl|wget)\s"):
+                r"^\s*(?:echo|export|chmod|curl|wget|eval|printf)\s", r"\$'[^']*\\x"):
         if re.search(pat, head, re.M):
             sc["sh"] += 2
     for pat in (r"\$\w+\s*=", r"Invoke-Expression|IEX\b", r"-EncodedCommand|-enc\b", r"\[System\.Convert\]::",
