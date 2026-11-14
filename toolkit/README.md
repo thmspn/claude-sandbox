@@ -20,6 +20,7 @@ python3 recon.py --selftest         # run all module self-tests
 |------|-------------|
 | triage | magic-byte file type, size, md5/sha1/sha256, ASCII + UTF-16LE strings (`-n` min length), overall/per-section entropy with packed heuristic, ELF headers + NX/PIE/canary/RELRO/FORTIFY, basic PE headers |
 | decode | decode/encode base64/base32/base58/hex/url/binary/decimal/octal/ascii, multi-round auto-decode, rot/caesar brute-force, atbash, vigenere (known key), single-byte XOR brute-force, repeating-key XOR, cipher-ID hints. `recon.py decode <text \| -f file>`; `--rot 5` or `--rot=5` for a shift, bare `--rot` brute-forces |
+| hashid | identify a hash by format marker/length (`$1$/$2y$/$6$/$y$`, NTLM pwdump lines, MySQL/Django/phpass prefixes, raw hex 32/40/64/...) and offline dictionary-crack unsalted md5/sha1/sha256/sha512/NTLM against a local wordlist (default Kali `rockyou.txt`, never downloaded) with optional case/leet/suffix mangling rules; bcrypt/yescrypt/sha*crypt are identify-only unless `bcrypt`/`passlib` happens to be installed. `recon.py hashid id <hash>` / `recon.py hashid crack <hash> [--wordlist PATH] [--rules]` |
 
 ## Adding a module
 Drop `modules/<name>.py` defining `NAME`, `DESCRIPTION`, `run(args) -> int`, `selftest() -> bool`.
