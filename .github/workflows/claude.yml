@@ -39,6 +39,7 @@ jobs:
           additional_permissions: |
             actions: read
 
+          restrict_untrusted_prs: "false"
           claude_args: |
             --model sonnet
             --max-turns 15
