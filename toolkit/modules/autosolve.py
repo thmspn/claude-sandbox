@@ -459,7 +459,7 @@ def _decode(code: bytes, off: int, addr: int, bits: int) -> "Insn | None":
             elif op2 == 0xA2:
                 clob = ("rax", "rbx", "rcx", "rdx")
         elif 0xC8 <= op2 <= 0xCF:
-            pass
+            mnem = "other"   # bswap: length only
         else:
             ck: tuple = ()
             if op2 in (0xD7, 0x50, 0xC5, 0x2C, 0x2D, 0xBC, 0xBD, 0xB8):
@@ -491,7 +491,7 @@ def _decode(code: bytes, off: int, addr: int, bits: int) -> "Insn | None":
             mnem = "push" if op < 0x58 else "pop"
             ops, modelled = (_reg((op & 7) | rb, ps, rex),), True
         elif op in (0x60, 0x61, 0x06, 0x07, 0x0E, 0x16, 0x17, 0x1E, 0x1F, 0x27, 0x2F, 0x37, 0x3F):
-            pass
+            mnem = "other"   # valid single-byte x86 forms (invalid in 64-bit mode, filtered above)
         elif op == 0x62 or op == 0xC4 or op == 0xC5:  # bound / les / lds (x86, non-VEX)
             other_modrm()
         elif op == 0x63:
@@ -510,7 +510,7 @@ def _decode(code: bytes, off: int, addr: int, bits: int) -> "Insn | None":
             mnem, modelled = "imul", True
             ops = (_reg(reg, osz, rex), rmop, Op("imm", osz, imm=v))
         elif 0x6C <= op <= 0x6F:
-            pass
+            mnem = "other"   # ins/outs: length only
         elif 0x70 <= op <= 0x7F:
             rel = _sx(imm(1), 8)
             tgt = (addr + (st["pos"] - off) + rel) & (M64 if bits == 64 else 0xFFFFFFFF)
@@ -857,10 +857,13 @@ class BinCtx:
 
     def _load_symbols(self) -> None:
         try:
+            alias: dict[int, list] = {}
             for s in revauto.elf_symbols(self.data):
                 if s["type"] in ("FUNC", "IFUNC") and s["value"] and s["shndx"] != 0 and s["name"]:
-                    self.syms.setdefault(s["value"], s["name"])
+                    alias.setdefault(s["value"], []).append(s["name"])
                     self.sym_addr.setdefault(s["name"], s["value"])
+            for a, names in alias.items():   # prefer the alias libc-call models know (fgets over _IO_fgets)
+                self.syms[a] = next((n for n in names if _norm(n) in _LIBFUNCS), names[0])
         except Exception as exc:  # noqa: BLE001
             self.notes.append(f"symbols: {type(exc).__name__}: {exc}")
 
@@ -871,8 +874,16 @@ class BinCtx:
             self.notes.append(f"plt: {type(exc).__name__}: {exc}")
             return
         gp = next((s.addr for s in self.sections if s.name == ".got.plt"), 0)
+        if self.bits == 64:   # static binaries: IRELATIVE slots -> resolver symbol (e.g. strlen)
+            for sec in self.sections:
+                if sec.name in (".rela.plt", ".rela.iplt") and sec.size % 24 == 0:
+                    for k in range(sec.size // 24):
+                        r_off, r_info, addend = struct.unpack_from("<QQq", self.data, sec.off + 24 * k)
+                        nm = self.syms.get(addend) if (r_info & 0xFFFFFFFF) == 37 else None
+                        if nm:
+                            self.got.setdefault(r_off, nm)
         for sec in self.sections:
-            if sec.name not in (".plt", ".plt.sec", ".plt.got", ".plt.bnd"):
+            if sec.name not in (".plt", ".plt.sec", ".plt.got", ".plt.bnd", ".iplt"):
                 continue
             code = self.data[sec.off:sec.off + sec.size]
             stride = 8 if sec.name == ".plt.got" else 16
@@ -1011,7 +1022,7 @@ class BinCtx:
 def _norm(name: str) -> str:
     """Strip PLT/version/``__isoc99_``/``__*_chk`` decorations."""
     n = name.split("@")[0]
-    n = re.sub(r"^__isoc\d+_", "", n)
+    n = re.sub(r"^(?:__isoc\d+_|_IO_|__GI_)", "", n)
     m = re.match(r"^__(.+)_chk$", n)
     if m:
         n = m.group(1)
@@ -1083,8 +1094,6 @@ def _build_func(ctx: BinCtx, start: int) -> Func:
                 if nm and _norm(nm) in NORETURN:
                     stops.add(a)
                     break
-            if i.mnem == "syscall" or (i.mnem == "int" and i.ops[0].imm == 0x80):
-                pass
             a = nxt
     return _finish_func(ctx, f, leaders, stops)
 
@@ -1313,6 +1322,8 @@ class Trace:
     deleg: dict = field(default_factory=dict)       # caller gate addr -> callee start
     deleg_pred: dict = field(default_factory=dict)  # callee start -> (success values, caller gate addr)
     ret_label: dict = field(default_factory=dict)   # jcc addr -> "return value of f@0x.."
+    cmov: dict = field(default_factory=dict)        # cmovcc addr -> "true" | "false" (move happens on success?)
+    cmov_sites: set = field(default_factory=set)    # verdict ref sites that a cmovcc chooses between
     notes: list = field(default_factory=list)
     only_side: str = ""
 
@@ -1414,7 +1425,7 @@ def _ret_value(blk: Block) -> Any:
         elif i.mnem == "setcc" and i.ops[0].kind == "reg" and i.ops[0].reg == "rax":
             e = ("set", i.addr, i.cc)
         elif i.mnem in ("movzx", "movsx") and i.ops[0].kind == "reg" and i.ops[0].reg == "rax":
-            pass
+            continue
         elif i.flow in ("call", "call-ind") or (i.ops and i.ops[0].kind == "reg" and i.ops[0].reg == "rax"
                                                  and i.mnem not in ("cmp", "test")):
             e = None
@@ -1443,6 +1454,29 @@ def _mk_gates(ctx: BinCtx, f: Func, rs: set, rf: set) -> list:
         out.append(Gate(0, t.addr, "jcc", t.cc or "", b.insns[k].addr if k is not None else None, f.start,
                         "taken" if s_t else "fallthrough", taken if s_t else fall, fall if s_t else taken,
                         f.in_loop(t.addr), 0, False, "unknown condition", conf))
+    return out
+
+
+def _cmov_gates(f: Func, tr: Trace) -> list:
+    """cmovcc gates: a cmov whose two register operands carry a success and a failure verdict pointer."""
+    out = []
+    for b in f.blocks.values():
+        regs: dict[str, int] = {}
+        for k, i in enumerate(b.insns):
+            if i.addr in tr.s_sites or i.addr in tr.f_sites:
+                if i.ops and i.ops[0].kind == "reg":
+                    regs[i.ops[0].reg] = i.addr
+            elif i.ops and i.ops[0].kind == "reg" and i.mnem in ("mov", "lea", "xor", "pop", "movzx"):
+                regs.pop(i.ops[0].reg, None)
+            if i.mnem == "cmovcc" and len(i.ops) == 2 and i.ops[0].kind == "reg" and i.ops[1].kind == "reg":
+                d, sv = regs.get(i.ops[0].reg), regs.get(i.ops[1].reg)
+                if d is not None and sv is not None and (d in tr.s_sites) != (sv in tr.s_sites):
+                    edge = "false" if d in tr.s_sites else "true"   # dst already holds success: the move must not happen
+                    ks = _flag_setter(b, k)
+                    out.append(Gate(0, i.addr, "cmovcc", i.cc or "", b.insns[ks].addr if ks is not None else None,
+                                    f.start, edge, None, None, f.in_loop(i.addr), 0, False, "unknown condition", "high"))
+                    tr.cmov[i.addr] = edge
+                    tr.cmov_sites |= {d, sv}
     return out
 
 
@@ -1540,7 +1574,7 @@ def trace(ctx: BinCtx, verdicts: list, opts: Options) -> Trace:
         gs = _mk_gates(ctx, f, rs, rf)
         for g in gs:
             g.label = _static_label(ctx, f, g, tr)
-        gates += gs
+        gates += gs + _cmov_gates(f, tr)
     for g in list(gates):   # delegated decisions: the gate tests an internal call's return value
         if g.addr not in tr.ret_label:
             continue
@@ -1670,9 +1704,12 @@ def _calc(name: str, w: int, a: int, b: int) -> int:
 
 
 def _unkof(*es: tuple) -> tuple | None:
+    """First unknown operand as a plain ``unk`` expression (canary values are opaque unknowns)."""
     for e in es:
-        if e[0] in ("unk", "canary"):
-            return ("unk", e[1] if e[0] == "unk" else "canary") if e[0] == "unk" else ("unk", "canary")
+        if e[0] == "unk":
+            return e
+        if e[0] == "canary":
+            return ("unk", "canary")
     return None
 
 
@@ -1746,6 +1783,8 @@ def S_op(name: str, w: int, a: tuple, b: tuple) -> tuple:
     """Simplifying binary constructor (folds constants, identities, add/xor chains, a^a)."""
     if a == b and name in ("xor", "sub") and a[0] != "ptr":
         return _c(0, w)
+    if a == b and name in ("and", "or"):
+        return a
     u = _unkof(a, b)
     if u:
         return u
@@ -1814,6 +1853,11 @@ def S_cc(cc: str, w: int, a: tuple, b: tuple) -> Any:
     if a[0] == "ptr" or b[0] == "ptr":
         if a == b:
             return bool(_cc_holds(cc, w, 0, 0))
+        other = b if a[0] == "ptr" else a
+        if other[0] == "c" and other[1] == 0 and cc in ("e", "ne"):   # tracked pointers are never NULL
+            return cc == "ne"
+        if a[0] == "ptr" and b[0] == "ptr" and a[1] == b[1] and a[2][0] == "c" and b[2][0] == "c":
+            return bool(_cc_holds(cc, 64, a[2][1], b[2][1]))
         return ("unk", "pointer compare")
     if a[0] == "c" and b[0] == "c":
         return bool(_cc_holds(cc, w, a[1], b[1]))
@@ -2323,6 +2367,8 @@ class Walker:
         return None
 
     def lenexpr(self) -> tuple:
+        if self.concrete is None:
+            self.res.flags.add("len-used")
         return ("len",) if self.concrete is None else _c(len(self.concrete), 64)
 
     def do_cmp(self, st: _St, nm: str, a: tuple, b: tuple, n: tuple | None) -> tuple:
@@ -2467,6 +2513,8 @@ class Walker:
             self.wr(st, ops[0], v)
         elif m == "cmovcc":
             c = self.cond(st, i.cc or "")
+            if i.addr in self.tr.cmov:
+                return self.cmov_decide(st, i, c, self.tr.cmov[i.addr])
             if c is True:
                 self.wr(st, ops[0], self.rd(st, ops[1]))
             elif c is not False:
@@ -2569,7 +2617,7 @@ class Walker:
         if isinstance(c, bool):
             if self.concrete is not None and s_t != s_f and c == s_f:
                 self.res.fail_at = i.addr
-            return self.branch(st, t, i.addr) if c else None if False else self._goto(st, t, fth, c, i.addr)
+            return self._goto(st, t, fth, c, i.addr)
         req, origin = _unwrap(c)
         if s_t and not s_f:
             want = True
@@ -2603,8 +2651,9 @@ class Walker:
         """Require the jump to be taken / not taken; refine domains; record the decision."""
         req = cond if taken else (_neg(cond) if cond[0] == "cc" else cond)
         why = _unk_why(req)
-        d = {"addr": i.addr, "kind": "jcc", "cond": req, "taken": taken, "origin": origin, "unresolved": bool(why),
-             "why": why, "cc": i.cc, "target": i.ops[0].target, "fall": i.addr + i.size}
+        d = {"addr": i.addr, "kind": "cmovcc" if i.mnem == "cmovcc" else "jcc", "cond": req, "taken": taken,
+             "origin": origin, "unresolved": bool(why), "why": why, "cc": i.cc,
+             "target": i.ops[0].target if i.flow == "jcc" else None, "fall": i.addr + i.size}
         if not why and req[0] == "cc":
             fv = _free(req)
             if fv == {"scmp"} or (req[3][0] == "scmp"):
@@ -2669,14 +2718,10 @@ class Walker:
         res, tr, ctx = self.res, self.tr, self.ctx
         while True:
             a = st.rip
-            if a in tr.s_sites:
-                res.found = True
-                res.s_hit = a
-                res.decisions = st.conds
-                res.dom, res.lend = st.dom, st.lend
-                res.inbuf = st.inbuf
+            if a in tr.s_sites and a not in tr.cmov_sites:
+                self.found(st, a)
                 return None
-            if a in tr.f_sites:
+            if a in tr.f_sites and a not in tr.cmov_sites:
                 return f"reached failure print at {a:#x}"
             if self.steps >= self.opts.max_steps:
                 res.stats["last"] = a
@@ -2696,8 +2741,31 @@ class Walker:
             except (KeyError, IndexError, ValueError, TypeError, AttributeError) as exc:
                 res.notes.append(f"walker error @{a:#x}: {type(exc).__name__}: {exc}")
                 return "walker error"
+            if why == "found":
+                return None
             if why is not None:
                 return why
+
+    def found(self, st: _St, at: int) -> None:
+        """Record the solution path (the success print was reached or selected)."""
+        res = self.res
+        res.found, res.s_hit, res.decisions = True, at, st.conds
+        res.dom, res.lend, res.inbuf = st.dom, st.lend, st.inbuf
+
+    def cmov_decide(self, st: _St, i: Insn, c: Any, edge: str) -> str | None:
+        """A cmovcc choosing between the success and failure verdict pointer: success needs ``edge`` behaviour."""
+        want_move = edge == "true"
+        if isinstance(c, bool):
+            if c == want_move:
+                self.found(st, i.addr)
+                return "found"
+            self.res.fail_at = i.addr
+            return f"cmov at {i.addr:#x} selects the failure verdict"
+        req, origin = _unwrap(c)
+        if not self.apply(st, i, req, origin, want_move):
+            return "infeasible"
+        self.found(st, i.addr)
+        return "found"
 
 
 def extract_constraints(ctx: BinCtx, tr: Trace, opts: Options) -> WalkResult:
@@ -2797,7 +2865,7 @@ def _build_constraints(wr: WalkResult) -> list:
 
 
 def _gate_label(ctx: BinCtx, tr: Trace, d: dict) -> str:
-    if d["addr"] in tr.ret_label and d["origin"] is None or d["addr"] in tr.deleg:
+    if d["addr"] in tr.deleg:
         return tr.ret_label.get(d["addr"], "unknown condition")
     kind = _dec_kind(d)
     req = d["cond"]
@@ -2824,7 +2892,7 @@ def _final_gates(ctx: BinCtx, tr: Trace, wr: WalkResult) -> list:
         keys = []
         if d["origin"]:
             keys.append((d["origin"], "setcc", d))
-        keys.append((d["addr"], "jcc", d))
+        keys.append((d["addr"], d["kind"], d))
         for addr, kind, dd in keys:
             g = order.get((addr, kind))
             if g is None:
@@ -2836,11 +2904,12 @@ def _final_gates(ctx: BinCtx, tr: Trace, wr: WalkResult) -> list:
                              sg.fail_to, sg.in_loop, 0, False, sg.label, sg.conf)
                 else:
                     taken = dd["taken"]
-                    g = Gate(0, addr, kind, (dd["cc"] or ""), None, fs, "taken" if taken else "fallthrough",
+                    g = Gate(0, addr, kind, (dd["cc"] or ""), None, fs,
+                             ("true" if taken else "false") if kind == "cmovcc" else ("taken" if taken else "fallthrough"),
                              dd["target"] if taken else dd["fall"], dd["fall"] if taken else dd["target"],
                              bool(f and f.in_loop(addr)), 0, False, "unknown condition", "medium")
-                if kind == "jcc" and sg is None or g.label == "unknown condition":
-                    g.label = _gate_label(ctx, tr, dd) if kind == "jcc" else g.label
+                if kind in ("jcc", "cmovcc") and (sg is None or g.label == "unknown condition"):
+                    g.label = _gate_label(ctx, tr, dd)
                 order[(addr, kind)] = g
             g.hits += 1
     gates = list(order.values())
@@ -2848,7 +2917,7 @@ def _final_gates(ctx: BinCtx, tr: Trace, wr: WalkResult) -> list:
         g.n = i
     last = wr.decisions[-1]
     for g in gates:
-        g.deciding = g.addr == last["addr"] and g.kind == "jcc"
+        g.deciding = g.addr == last["addr"] and g.kind in ("jcc", "cmovcc")
     return gates
 
 
@@ -2891,7 +2960,7 @@ def _solve_multi(decs: list, dom: dict, lenval: int | None) -> tuple[bool, int]:
         if d["unresolved"] or d["cond"][0] != "cc" or d["cond"][3][0] == "scmp":
             continue
         ks = sorted(k for k in _free(d["cond"]) if k != "len")
-        if len(ks) >= 2 or (ks and "len" in _free(d["cond"]) and len(ks) == 1 and lenval is not None and False):
+        if len(ks) >= 2:
             multis.append((d["cond"], ks))
     evals = 0
 
@@ -2986,7 +3055,7 @@ def solve(ctx: BinCtx, wr: WalkResult, opts: Options) -> Solution:
         if constrained and dom[constrained[-1]] == 1:
             L = constrained[-1]
         else:
-            len_open = True
+            len_open = "len-used" in wr.flags
     if not constrained and lenval is None:
         sol.trace.append("no input byte is constrained on the success path")
         return sol
@@ -3054,8 +3123,6 @@ def _finish_solution(ctx: BinCtx, tr: Trace, opts: Options, wr: WalkResult, sol:
     pat = batch.FLAG_RE.search(cand) is not None or bool(opts.flag_re and opts.flag_re.search(cand.decode("latin-1")))
     sol.flag_match = pat
     # rodata-flag: a flag-shaped string in the image that the checker accepts
-    if sol.conf == "low" and not unknown:
-        pass
     if sol.conf != "high":
         for addr, raw in ctx.rodata_flags[:4]:
             ok2, msg2 = _rewalk(ctx, tr, opts, wr, raw)
@@ -3100,12 +3167,15 @@ def _mk_patch(ctx: BinCtx, g: Gate, src: str, out: str, primary: bool) -> Patch 
         cmd = f"recon.py elfpatch patch {src} --at {g.addr:#x} --bytes {new.hex()} -o {out}"
         desc = f"{g.addr:#x} set{g.cc} ({g.label}): force the result to {1 if ok_to else 0}"
     elif g.kind == "cmovcc" and i.mnem == "cmovcc":
-        if ok_to:
-            new, strat = bytes(raw[:len(raw) - 3]) + b"\x8b" + raw[-2:-1] + raw[-1:] if False else b"", "cmov-to-mov"
-            return None
-        new, strat = b"\x90" * len(raw), "nop-jcc"
-        cmd = f"recon.py elfpatch nop {src} --at {g.addr:#x} --len {len(raw)} -o {out}"
-        desc = f"{g.addr:#x} cmov{g.cc}: suppress the move"
+        if ok_to:   # make the move unconditional: [REX] 0F 4x modrm -> [REX] 8B modrm NOP
+            rex = raw[:1] if 0x40 <= raw[0] <= 0x4F else b""
+            new, strat = rex + b"\x8b" + raw[len(rex) + 2:len(rex) + 3] + b"\x90", "cmov-to-mov"
+            cmd = f"recon.py elfpatch patch {src} --at {g.addr:#x} --bytes {new.hex()} -o {out}"
+            desc = f"{g.addr:#x} cmov{g.cc}: make the move unconditional"
+        else:
+            new, strat = b"\x90" * len(raw), "nop-jcc"
+            cmd = f"recon.py elfpatch nop {src} --at {g.addr:#x} --len {len(raw)} -o {out}"
+            desc = f"{g.addr:#x} cmov{g.cc}: suppress the move"
     else:
         return None
     return Patch(g.addr, off, bytes(raw), new, strat, desc, cmd, primary, g.conf)
@@ -3157,7 +3227,7 @@ def plan_patches(ctx: BinCtx, tr: Trace, wr: WalkResult) -> list:
             old = ctx.data[off:off + len(new)]
             plan.append(Patch(x, off, old, new, "ret-true", f"{x:#x} {ctx.fname(x)}: return the success value immediately",
                               f"recon.py elfpatch patch {src} --at {x:#x} --bytes {new.hex()} -o {src}.alt", False, "medium"))
-    if len(plan) >= 1 and deciding.kind == "jcc":
+    if plan and deciding.kind == "jcc":
         i = ctx.insn(deciding.addr)
         off = disasm.vaddr_to_offset(ctx.elf, deciding.addr)
         if i is not None and off is not None and i.flow == "jcc":
@@ -3208,6 +3278,21 @@ def _cs_text(i: Insn, bits: int) -> str | None:
     except Exception:  # noqa: BLE001
         return None
     return None
+
+
+def _cs_crosscheck(ctx: BinCtx, tr: Trace) -> str:
+    """--deep: compare built-in instruction lengths with capstone over the analysed functions."""
+    n = bad = 0
+    for f in tr.funcs.values():
+        for i in f.insns.values():
+            n += 1
+            try:
+                md = _CS.Cs(_CS.CS_ARCH_X86, _CS.CS_MODE_64 if ctx.bits == 64 else _CS.CS_MODE_32)
+                got = list(md.disasm(i.raw, i.addr))
+                bad += 0 if got and got[0].size == i.size else 1
+            except Exception:  # noqa: BLE001
+                bad += 1
+    return f"capstone length cross-check: {n} instructions, {bad} mismatch(es)"
 
 
 def render_listing(ctx: BinCtx, tr: Trace, wr: WalkResult, deep: bool = False) -> list:
@@ -3403,7 +3488,9 @@ def _analyze(data: bytes, name: str, opts: Options | None, stages: str) -> tuple
     if "t" in need and ctx.x86 and time.time() - t0 < STATIC_BUDGET:
         tr = _stage(rep, "trace", trace, ctx, verdicts, opts) or Trace()
         rep.notes += [n for n in tr.notes if n not in rep.notes]
-        rep.gates = [g for g in tr.gates if True]
+        if opts.deep and _CS is not None:
+            rep.notes.append(_cs_crosscheck(ctx, tr))
+        rep.gates = list(tr.gates)
     if "c" in need and tr.entry is not None and time.time() - t0 < STATIC_BUDGET:
         wr = _stage(rep, "constraints", extract_constraints, ctx, tr, opts) or WalkResult()
         wr.tr = tr
@@ -3577,6 +3664,9 @@ def report_to_dict(report: "Report") -> dict:
     return d
 
 
+_GMN = {"jcc": "j", "setcc": "set", "cmovcc": "cmov"}
+
+
 def _cut(s: str, n: int = 100) -> str:
     return s if len(s) <= n else s[:n - 1] + "…"
 
@@ -3651,7 +3741,7 @@ def render_text(report: "Report", deep: bool = False, view: str = "all") -> str:
     dec = next((g for g in gates if g.deciding), None)
     if "DEC" in want and dec:
         loop = f", in loop x{dec.hits}" if dec.in_loop and dec.hits else (", in loop" if dec.in_loop else "")
-        L += _sec("DECIDING", [f"{dec.addr:#x}  {'j' if dec.kind == 'jcc' else 'set'}{dec.cc}  ({dec.label}{loop})  "
+        L += _sec("DECIDING", [f"{dec.addr:#x}  {_GMN[dec.kind]}{dec.cc}  ({dec.label}{loop})  "
                                f"success = {dec.success_edge}"])
     if "GATES" in want and gates:
         body = []
@@ -3661,7 +3751,7 @@ def render_text(report: "Report", deep: bool = False, view: str = "all") -> str:
             ct = c.text.split("   (gate")[0] if c else ""
             if c and "   for i" in c.text:
                 ct = c.text.split("   (gate")[0].replace("   for ", ", ").replace(" + i", "+i").replace("i = ", "i=")
-            body.append(f"#{g.n} {g.addr:#x} {'j' if g.kind == 'jcc' else 'set'}{g.cc:<3} "
+            body.append(f"#{g.n} {g.addr:#x} {_GMN[g.kind]}{g.cc:<3} "
                         f"{g.label + (' *' if g.deciding else ''):<24} {ct} {_tag(c.conf if c else g.conf)}")
         if len(gates) > lim:
             body.append(f"… {len(gates) - lim} more (--deep)")
@@ -3704,8 +3794,6 @@ def render_text(report: "Report", deep: bool = False, view: str = "all") -> str:
         L += _sec("PATCH", body)
     if "NEXT" in want and report.next_steps:
         L += _sec("NEXT STEPS", [f"{i}. {s}" for i, s in enumerate(report.next_steps, 1)])
-    if "NOTES" in want or "ANGR" in want:
-        pass
     if "ANGR" in want and report.angr is not None:
         L += _angr_lines(report.angr, deep)
     if "NOTES" in want:
@@ -4204,6 +4292,24 @@ def _fx_f5() -> bytes:
                               ("S_BAD", b"Wrong!")], {"main": "main"}, plt=["fgets", "strcspn", "strcmp", "puts"])
 
 
+def _fx_f7() -> bytes:
+    a = _Asm(64)
+    a.label("main")
+    a.raw("4883ec48 4889e7")
+    a.rel32(b"\xe8", "gets")
+    a.raw("4889e7 803f41")
+    a.rip32(b"\x48\x8d\x3d", "S_OK")
+    a.rip32(b"\x48\x8d\x05", "S_BAD")
+    a.raw("480f45f8")
+    a.rel32(b"\xe8", "puts")
+    a.raw("4883c448 c3")
+    for n in ("gets", "puts"):
+        a.label(n)
+        a.raw("c3")
+    return _build_elf(64, a, [("S_OK", b"Correct!"), ("S_BAD", b"Wrong.")],
+                      {"main": "main", "gets": "gets", "puts": "puts"})
+
+
 def _fx_f6() -> bytes:
     return _fx_f1(b"AAAA", b"BBBB", extra=False)
 
@@ -4543,6 +4649,14 @@ def selftest() -> bool:
             r = analyze(fx["f1"], "f1", Options(max_steps=50))
             return any("walker step budget exhausted" in n for n in r.notes) and r.outcome == "patch"
         safe("S16 budgets (--max-steps note, falls back to patch)", s16)
+
+        def s17() -> bool:
+            r = analyze(_fx_f7(), "f7", Options())
+            pr = [p for p in r.patches if p.primary]
+            return (any(g.kind == "cmovcc" for g in r.gates) and r.solution is not None
+                    and r.solution.candidate == b"A" and r.solution.conf == "high"
+                    and len(pr) == 1 and pr[0].old == bytes.fromhex("480f45f8") and pr[0].new == b"\x90" * 4)
+        safe("S17 F7 cmov verdict select (cmovcc gate, nop-the-move patch, solution 'A')", s17)
     finally:
         _FIND_SPEC, _ANGR_RUNNER, _CS = saved
         shutil.rmtree(tmp, ignore_errors=True)
