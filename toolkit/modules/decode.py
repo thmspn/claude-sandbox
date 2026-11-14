@@ -190,7 +190,8 @@ def auto_decode(text: str, max_rounds: int = 10) -> tuple[bytes, list[str]]:
     """
     cur = text.encode("latin-1", "replace")
     chain: list[str] = []
-    for _ in range(max_rounds):
+    seen = {cur}  # fixed-point / cycle guard (in addition to the max_rounds cap)
+    for _ in range(max(0, min(max_rounds, 50))):
         if plaintext_like(cur) and not re.fullmatch(rb"\S+", cur.strip()):
             break
         s = _txt(cur).strip()
@@ -202,8 +203,9 @@ def auto_decode(text: str, max_rounds: int = 10) -> tuple[bytes, list[str]]:
             sc = english_score(out)
             if best is None or sc > best[0]:
                 best = (sc, name, out)
-        if best is None or out_is_noise(best[2]):
+        if best is None or out_is_noise(best[2]) or best[2] in seen:
             break
+        seen.add(best[2])
         chain.append(best[1])
         cur = best[2]
     return cur, chain
