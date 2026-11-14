@@ -42,6 +42,6 @@ jobs:
           restrict_untrusted_prs: "false"
           claude_args: |
             --model sonnet
-            --max-turns 15
+            --max-turns 30
             --allowedTools "Bash(gh pr merge*),Bash(python3*)"
             --dangerously-skip-permissions
