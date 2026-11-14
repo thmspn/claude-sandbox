@@ -381,7 +381,8 @@ def run(args: list[str]) -> int:
     g.add_argument("-d", "--decode", choices=sorted(DECODERS), help="decode with this encoding")
     g.add_argument("-e", "--encode", choices=sorted(ENCODERS), help="encode with this encoding")
     g.add_argument("--rounds", type=int, default=10, help="max auto-decode rounds (default 10)")
-    g.add_argument("--rot", nargs="?", const=-1, type=int, metavar="N", help="rot N, or brute-force all 25 (no N)")
+    g.add_argument("--rot", nargs="?", const="", metavar="N",
+                   help="rot N (--rot 5 or --rot=5), or brute-force all 25 (no N)")
     g.add_argument("--atbash", action="store_true")
     g.add_argument("--vigenere", metavar="KEY", help="vigenere decrypt with KEY (--encrypt to encrypt)")
     g.add_argument("--encrypt", action="store_true", help="with --vigenere: encrypt instead")
@@ -390,6 +391,15 @@ def run(args: list[str]) -> int:
     g.add_argument("--hints", action="store_true", help="only print cipher-ID hints")
     p.add_argument("--top", type=int, default=5, help="candidates to show (default 5)")
     ns = p.parse_args(args)
+    if ns.rot is not None:
+        # --rot takes an optional value as a string so a following non-numeric
+        # token is treated as input (brute-force), while "--rot 5"/"--rot=5" is a shift.
+        if ns.rot.lstrip("-").isdigit():
+            ns.rot = int(ns.rot)
+        else:
+            if ns.rot:
+                ns.input.insert(0, ns.rot)
+            ns.rot = -1
 
     raw = _read_input(ns)
     if raw is None:
