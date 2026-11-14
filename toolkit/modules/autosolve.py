@@ -3676,9 +3676,11 @@ def _tag(c: str) -> str:
 
 
 def _sec(label: str, body: list) -> list:
+    """Label the first line, indent the rest, cut to 100 columns (ready-to-paste commands are never cut)."""
     out = []
     for i, ln in enumerate(body):
-        out.append(_cut((f"{label:<11}" if i == 0 else " " * 11) + ln))
+        full = (f"{label:<11}" if i == 0 else " " * 11) + ln
+        out.append(full if ln.lstrip().startswith("recon.py ") else _cut(full))
     return out
 
 
@@ -4454,7 +4456,8 @@ def selftest() -> bool:
                     and len(pr) == 2 and pr[0].old[:2] == b"\x0f\x85" and pr[0].new == b"\x90" * 6
                     and pr[1].old[0] == 0x75 and pr[1].new == b"\x90\x90"
                     and pr[0].elfpatch.startswith("recon.py elfpatch nop ") and "--len 6" in pr[0].elfpatch
-                    and len(txt.splitlines()) <= 90 and max(len(x) for x in txt.splitlines()) <= 100)
+                    and len(txt.splitlines()) <= 90
+                    and max(len(x) for x in txt.splitlines() if not x.lstrip().startswith("recon.py ")) <= 100)
         safe("S3 F1 end-to-end (xor-table loop, derived [H], 2-patch plan, compact report)", s3)
 
         def s4() -> bool:
