@@ -40,6 +40,7 @@ jobs:
             actions: read
 
           restrict_untrusted_prs: "false"
+          trigger_phrase: "@opus"
           claude_args: |
             --model opus
             --max-turns 25
