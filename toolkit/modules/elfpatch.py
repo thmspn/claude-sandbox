@@ -178,6 +178,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def run(args: list[str]) -> int:
     """CLI entry point: ``elfpatch <patch|nop|flip|entry|dump|replace|selftest> ...``."""
+    if args[:1] in (["selftest"], ["--selftest"]):
+        return 0 if selftest() else 1
     parser = _build_parser()
     try:
         ns = parser.parse_args(args)
