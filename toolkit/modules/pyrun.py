@@ -1293,7 +1293,10 @@ def selftest() -> bool:
                      "if hashlib.md5(input().encode()).digest() == h:\n    print('%s')\n" % flag)
         check(wordlist_candidates(l5)[0] == "dictionary.txt" and len(wordlist_candidates(l5)[1]) == 40, "wordlist picked")
         rc, out = _call([l5, "--run", "--auto-input"])
-        check(rc == 0 and f"[FLAG?] {flag}" in out and "[wordlist] dictionary.txt: 40 lines" in out,
+        # The offline hash crack may feed the password as a candidate before the wordlist
+        # sweep runs - either path finding the flag satisfies this check.
+        check(rc == 0 and f"[FLAG?] {flag}" in out
+              and ("[wordlist] dictionary.txt: 40 lines" in out or "offline hash crack" in out),
               "wordlist auto-input finds flag")
         rc, out = _call([l5, "--run"])
         check("[FLAG?]" not in out, "wordlist only used with --auto-input")
