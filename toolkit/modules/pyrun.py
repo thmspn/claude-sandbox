@@ -766,6 +766,17 @@ def sandbox_run(target: str, lines: list[str], timeout: float, allow_proc: bool 
     try:
         work = os.path.join(base, "cwd")
         os.mkdir(work)
+        # Sibling data files (level1.flag.txt.enc, codebook.txt, ...) must be visible to
+        # scripts that open them relatively - copy the script's own directory into the
+        # sandbox cwd (capped; skips subdirs and >16 MB members).
+        srcdir = os.path.dirname(target)
+        for name in os.listdir(srcdir):
+            sp = os.path.join(srcdir, name)
+            try:
+                if os.path.isfile(sp) and os.path.getsize(sp) <= 16 << 20:
+                    shutil.copy(sp, os.path.join(work, name))
+            except OSError:
+                pass
         shim = os.path.join(base, "shim.py")
         with open(shim, "w", encoding="utf-8") as fh:
             fh.write(SHIM)
