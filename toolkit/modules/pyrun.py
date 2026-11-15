@@ -32,6 +32,7 @@ import argparse
 import ast
 import base64
 import binascii
+import concurrent.futures
 import contextlib
 import io
 import operator
@@ -60,6 +61,9 @@ OUTPUT_CAP = 1_000_000          # bytes of child stdout/stderr read back
 SHOW_CAP = 4000                 # chars of child output echoed
 MAX_AUTO_CANDIDATES = 24
 MAX_SOLO_RUNS = 8
+MAX_SWEEP = 5000                # candidates (source literals + wordlist lines) tried one-per-run
+SWEEP_WORKERS = 8
+SWEEP_BUDGET = 180.0            # wall-clock seconds for the whole sweep
 DEFAULT_INPUTS = ["", "password"]
 REFUSE_CATS = ("network", "subprocess", "shell", "write-outside", "obf-import")
 
@@ -190,6 +194,18 @@ def _fold(node: ast.AST, env: dict[str, Any], d: int) -> Any:
         if isinstance(node.op, ast.Invert):
             return ~v
         raise _NoFold
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        # Flatten the left spine iteratively: ``chr(1) + chr(2) + ... + chr(90)`` is a
+        # left-nested chain whose depth would otherwise exceed the recursion budget.
+        spine: list[ast.AST] = []
+        cur: ast.AST = node
+        while isinstance(cur, ast.BinOp) and isinstance(cur.op, ast.Add):
+            spine.append(cur.right)
+            cur = cur.left
+        acc = fold(cur, env, d)
+        for right in reversed(spine):
+            acc = _check(acc + fold(right, env, d))
+        return acc
     if isinstance(node, ast.BinOp):
         a, b = fold(node.left, env, d), fold(node.right, env, d)
         op = type(node.op)
@@ -321,6 +337,19 @@ class Scan:
         return [f for f in self.findings if f.cat in REFUSE_CATS]
 
 
+_FILE_EXT_RE = re.compile(r"\.(txt|bin|enc|py|pyc|md|json|csv|log|dat|hash|key|pem|png|jpg|gif|zip|gz|tar|"
+                          r"elf|exe|so|dll|html?|xml|ya?ml|cfg|ini|sh|c|h|out|flag)$", re.I)
+
+
+def password_shaped(s: str) -> bool:
+    """Plausible password: printable ASCII, 2-32 chars, no whitespace, not a filename/path/option."""
+    if not 2 <= len(s) <= 32 or any(not 32 < ord(c) < 127 for c in s):
+        return False
+    if _FILE_EXT_RE.search(s) or s.startswith(("/", "./", "../", "-", "~")):
+        return False
+    return not ("%" in s and re.search(r"%[sdrx]", s)) and not re.search(r"\{\w*\}", s)
+
+
 _CONF_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 
 
@@ -411,9 +440,22 @@ class _Scanner:
                     self.loop_lists.append((node.lineno, list(v)))
                     for item in v:
                         self.cand(item, "LOW", "literal list iterated in for-loop", node.lineno)
+        self.collect_source_passwords()
         self.check_xor_calls()
         self.scan.candidates.sort(key=lambda c: (_CONF_ORDER[c.conf], c.line))
         self.scan.findings.sort(key=lambda f: f.line)
+
+    def collect_source_passwords(self) -> None:
+        """LOW candidates: password-shaped strings in top-level list/tuple/set constants."""
+        mods = {a.split(".")[0] for a in self.alias.values()} | set(self.alias)
+        for st in self.tree.body:
+            value = st.value if isinstance(st, (ast.Assign, ast.AnnAssign)) else None
+            if not isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+                continue
+            for elt in value.elts:
+                ok, v = try_fold(elt, self.env)
+                if ok and isinstance(v, str) and password_shaped(v) and v not in mods:
+                    self.cand(v, "LOW", "string literal in top-level list/tuple/set", st.lineno)
 
     def collect_imports(self) -> None:
         for node in ast.walk(self.tree):
@@ -620,22 +662,56 @@ class _Scanner:
 
     # -- xor derivations
     def check_xor_calls(self) -> None:
-        if not self.xor_funcs:
-            return
-        for node in ast.walk(self.tree):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id in self.xor_funcs and len(node.args) == 2 and not node.keywords):
-                continue
-            vals = [try_fold(a, self.env) for a in node.args]
-            fn = node.func.id
-            if all(ok for ok, _ in vals):
-                self.add_xor(fn, vals[0][1], vals[1][1], node.lineno, "xor-fold (both args constant)")
-            elif sum(ok for ok, _ in vals) == 1:
-                secret = next(v for ok, v in vals if ok)
-                if not isinstance(secret, (str, bytes)):
+        """Find ``xor_func(a, b)`` calls anywhere (module level and inside functions)."""
+        if self.xor_funcs:
+            self._xor_scope(self.tree, self.env)
+
+    def local_env(self, fn: ast.AST, outer: dict[str, Any]) -> dict[str, Any]:
+        """``outer`` plus the foldable single-assignment locals of function ``fn``.
+
+        Names the function binds in any other way (params, loops, multiple assignments)
+        shadow outer constants and are therefore removed.
+        """
+        stores: dict[str, int] = {}
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                stores[n.id] = stores.get(n.id, 0) + 1
+            elif isinstance(n, ast.arg):
+                stores[n.arg] = stores.get(n.arg, 0) + 2
+        env = {k: v for k, v in outer.items() if k not in stores}
+        for st in getattr(fn, "body", []):
+            if isinstance(st, ast.Assign) and len(st.targets) == 1 \
+                    and isinstance(st.targets[0], ast.Name) and stores.get(st.targets[0].id) == 1:
+                ok, v = try_fold(st.value, env)
+                if ok:
+                    env[st.targets[0].id] = v
+        return env
+
+    def _xor_scope(self, scope: ast.AST, env: dict[str, Any]) -> None:
+        stack: list[ast.AST] = [scope]
+        while stack:
+            for child in ast.iter_child_nodes(stack.pop()):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    self._xor_scope(child, self.local_env(child, env))
                     continue
-                for c in list(self.scan.candidates):
-                    self.add_xor(fn, secret, c.value, node.lineno, f"xor-decrypt with {c.conf} candidate")
+                if isinstance(child, ast.Call):
+                    self._xor_call(child, env)
+                stack.append(child)
+
+    def _xor_call(self, node: ast.Call, env: dict[str, Any]) -> None:
+        if not (isinstance(node.func, ast.Name) and node.func.id in self.xor_funcs
+                and len(node.args) == 2 and not node.keywords):
+            return
+        vals = [try_fold(a, env) for a in node.args]
+        fn = node.func.id
+        if all(ok for ok, _ in vals):
+            self.add_xor(fn, vals[0][1], vals[1][1], node.lineno, "xor-fold (both args constant)")
+        elif sum(ok for ok, _ in vals) == 1:
+            secret = next(v for ok, v in vals if ok)
+            if not isinstance(secret, (str, bytes)):
+                return
+            for c in list(self.scan.candidates):
+                self.add_xor(fn, secret, c.value, node.lineno, f"xor-decrypt with {c.conf} candidate")
 
     def add_xor(self, fn: str, secret: Any, key: Any, line: int, why: str) -> None:
         try:
@@ -827,6 +903,81 @@ def auto_inputs(scan: Scan) -> list[str]:
     return vals
 
 
+def wordlist_candidates(path: str, limit: int = MAX_SWEEP) -> tuple[Optional[str], list[str]]:
+    """Lines of a small sibling wordlist (name has dict/word/pass, else any ``*.txt``).
+
+    The script's own ``.enc``/``.bin``/``.py`` companions are never used. Returns
+    ``(file name, lines)``; at most ``limit`` non-empty lines of <= 256 chars.
+    """
+    srcdir = os.path.dirname(os.path.abspath(path))
+    me = os.path.basename(path)
+    stem = me.rsplit(".", 1)[0]
+    ranked: list[tuple[int, str]] = []
+    try:
+        names = sorted(os.listdir(srcdir))
+    except OSError:
+        return None, []
+    for name in names:
+        low = name.lower()
+        full = os.path.join(srcdir, name)
+        if name == me or low.endswith((".enc", ".bin", ".py", ".pyc")) or name.startswith(stem + ".") \
+                or not os.path.isfile(full):
+            continue
+        if any(k in low for k in ("dict", "word", "pass")):
+            ranked.append((0, name))
+        elif low.endswith(".txt"):
+            ranked.append((1, name))
+    for _rank, name in sorted(ranked):
+        full = os.path.join(srcdir, name)
+        try:
+            if os.path.getsize(full) > 4 << 20:
+                continue
+            with open(full, "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+        if b"\0" in raw[:4096]:
+            continue
+        out: list[str] = []
+        for ln in raw.decode("utf-8", "replace").splitlines():
+            ln = ln.strip()
+            if ln and len(ln) <= 256 and ln not in out:
+                out.append(ln)
+                if len(out) >= limit:
+                    break
+        if out:
+            return name, out
+    return None, []
+
+
+def sweep(path: str, pool: list[str], explicit: list[str], timeout: float, force: bool,
+          argv: list[str] | None) -> Optional[tuple[str, RunResult]]:
+    """Try each candidate as the sole stdin line (parallel, one sandbox per run).
+
+    Stops at the first run whose output contains a flag; bounded by ``SWEEP_BUDGET``.
+    Returns ``(candidate, result)`` or None.
+    """
+    import time
+    deadline = time.monotonic() + SWEEP_BUDGET
+
+    def one(cand: str) -> Optional[tuple[str, RunResult]]:
+        if time.monotonic() > deadline:
+            return None
+        res = sandbox_run(path, explicit + [cand], timeout, allow_proc=force, argv=list(argv or []))
+        return (cand, res) if find_flags(res.stdout + "\n" + res.stderr) else None
+
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=SWEEP_WORKERS)
+    try:
+        futs = [ex.submit(one, c) for c in pool]
+        for f in concurrent.futures.as_completed(futs):
+            hit = f.result()
+            if hit:
+                return hit
+        return None
+    finally:
+        ex.shutdown(wait=True, cancel_futures=True)
+
+
 def _report_run(res: RunResult, label: str) -> list[str]:
     print(f"--- run ({label}) ---")
     if res.timed_out:
@@ -874,8 +1025,31 @@ def guarded_run(path: str, scan: Scan, explicit: list[str], auto: bool, force: b
     assert last is not None
     if last.timed_out:
         return 124
-    if not find_flags(last.stdout + "\n" + last.stderr):
-        print("no flag-shaped output")
+    if find_flags(last.stdout + "\n" + last.stderr):
+        return 0
+    if auto:
+        # Scripts that read one password per run: try every remaining candidate (source
+        # literals, sibling wordlist) as the sole stdin line. The 24/8 budgets above are
+        # unchanged; this is a separate, bounded sweep (MAX_SWEEP runs, SWEEP_BUDGET s).
+        tried = {a for a in auto_inputs(scan)[:MAX_SOLO_RUNS]}
+        pool = [c.value for c in scan.candidates]
+        wl_name, wl = wordlist_candidates(path)
+        if wl_name:
+            print(f"[wordlist] {wl_name}: {len(wl)} lines")
+            pool += wl
+        pool = [c for i, c in enumerate(pool) if c not in tried and c not in pool[:i]][:MAX_SWEEP]
+        if pool:
+            if wl_name:
+                whole = sandbox_run(path, explicit + wl, timeout, allow_proc=force, argv=list(argv or []))
+                if find_flags(whole.stdout + "\n" + whole.stderr):
+                    _report_run(whole, f"{wl_name} streamed as stdin")
+                    return 0
+            hit = sweep(path, pool, explicit, timeout, force, argv)
+            if hit:
+                _report_run(hit[1], f"sweep input {hit[0]!r} ({len(pool)} candidates)")
+                return 0
+            print(f"sweep: {len(pool)} candidates tried, no flag")
+    print("no flag-shaped output")
     return 0
 
 
@@ -1023,6 +1197,47 @@ def selftest() -> bool:
         ar = write("ar.py", "import base64\nb = 'cGljb0NURntibG9ifQ=='\nv = int(input())\nif v == 6 * 7 + 1:\n    print('ok')\n")
         rc, out = _call([ar])
         check("'43'" in out and "[base64]" in out and "picoCTF{blob}" in out, "arith candidate + base64 blob")
+
+        # fix 1: >60-term chr() chain + xor call in a function with function-local assignment
+        long_flag = "picoCTF{" + "x" * 90 + "}"
+        ser = write("ser.py", _benign_sample("A", "abc1").split("flag_enc")[0]
+                    + f"flag_enc = {_xor_literal(long_flag, 'enkidu')}\n"
+                    + "def go():\n    k = 'enk' + 'idu'\n    print(str_xor(flag_enc, k))\n")
+        rc, out = _call([ser])
+        check(f"-> {long_flag}" in out and "[HIGH]" in out, "long chr() chain + function-local key folds to flag")
+
+        # fix 2: source-literal password list (md5 compare, never a literal compare) swept past the 8 solo runs
+        import hashlib
+        pws = [f"cand{i:02d}" for i in range(20)] + ["notes.txt", "has space", "x"]
+        good = pws[15]
+        l3 = write("lvl3.py", "import hashlib\npos_pw_list = %r\n"
+                   "h = hashlib.md5(input('pw: ').encode()).hexdigest()\n"
+                   "if h == %r:\n    print('%s')\nelse:\n    print('no')\n"
+                   % (pws, hashlib.md5(good.encode()).hexdigest(), flag))
+        rc, out = _call([l3])
+        check("'cand00'" in out and "notes.txt" not in out and "has space" not in out and "'x'" not in out,
+              "source-literal candidates filtered (filename/whitespace/too short)")
+        rc, out = _call([l3, "--run", "--auto-input"])
+        check(rc == 0 and f"[FLAG?] {flag}" in out, "source-literal candidate beyond solo-run budget found by sweep")
+
+        # fix 3: sibling wordlist streamed one-per-run; .bin companion ignored
+        wdir = os.path.join(tmp, "wl")
+        os.mkdir(wdir)
+        words = [f"w{i}" for i in range(40)]
+        with open(os.path.join(wdir, "dictionary.txt"), "w") as fh:
+            fh.write("\n".join(words) + "\n")
+        with open(os.path.join(wdir, "lvl5.hash.bin"), "wb") as fh:
+            fh.write(hashlib.md5(b"w31").digest())
+        l5 = os.path.join(wdir, "lvl5.py")
+        with open(l5, "w") as fh:
+            fh.write("import hashlib\nh = open('lvl5.hash.bin','rb').read()\n"
+                     "if hashlib.md5(input().encode()).digest() == h:\n    print('%s')\n" % flag)
+        check(wordlist_candidates(l5)[0] == "dictionary.txt" and len(wordlist_candidates(l5)[1]) == 40, "wordlist picked")
+        rc, out = _call([l5, "--run", "--auto-input"])
+        check(rc == 0 and f"[FLAG?] {flag}" in out and "[wordlist] dictionary.txt: 40 lines" in out,
+              "wordlist auto-input finds flag")
+        rc, out = _call([l5, "--run"])
+        check("[FLAG?]" not in out, "wordlist only used with --auto-input")
     finally:
         os.chdir(cwd)
         shutil.rmtree(tmp, ignore_errors=True)
