@@ -843,7 +843,7 @@ def _report_run(res: RunResult, label: str) -> list[str]:
     return flags
 
 
-def guarded_run(path: str, scan: Scan, explicit: list[str], auto: bool, force: bool, timeout: float) -> int:
+def guarded_run(path: str, scan: Scan, explicit: list[str], auto: bool, force: bool, timeout: float, argv: list[str] | None = None) -> int:
     """Phase 2: apply the refusal guardrail, then run. Returns the exit code."""
     if scan.syntax_error:
         print(f"REFUSED: script does not parse ({scan.syntax_error}); nothing was run")
@@ -867,7 +867,7 @@ def guarded_run(path: str, scan: Scan, explicit: list[str], auto: bool, force: b
         runs.append(("explicit input" if explicit else "no stdin input", explicit))
     last: Optional[RunResult] = None
     for label, lines in runs:
-        last = sandbox_run(path, lines, timeout, allow_proc=force, argv=list(getattr(ns, "argv", []) or []))
+        last = sandbox_run(path, lines, timeout, allow_proc=force, argv=list(argv or []))
         flags = _report_run(last, label)
         if flags or last.timed_out:
             break
@@ -907,7 +907,7 @@ def run(args: list[str]) -> int:
     print(format_scan(scan))
     if not ns.run:
         return 0
-    return guarded_run(ns.script, scan, list(ns.input), ns.auto_input, ns.force, ns.timeout)
+    return guarded_run(ns.script, scan, list(ns.input), ns.auto_input, ns.force, ns.timeout, argv=list(ns.argv or []))
 
 
 # --------------------------------------------------------------------------- selftest
