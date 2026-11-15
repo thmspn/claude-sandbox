@@ -760,7 +760,7 @@ def _read_capped(path: str) -> str:
         return fh.read(OUTPUT_CAP).decode("utf-8", "replace")
 
 
-def sandbox_run(target: str, lines: list[str], timeout: float, allow_proc: bool = False, argv: list[str] | None = None, argv=list(getattr(ns, "argv", []) or [])) -> RunResult:
+def sandbox_run(target: str, lines: list[str], timeout: float, allow_proc: bool = False, argv: list[str] | None = None) -> RunResult:
     """Run ``target`` in the shim (child interpreter, fresh temp cwd, rlimits, no network)."""
     target = os.path.abspath(target)
     base = tempfile.mkdtemp(prefix="pyrun-")
@@ -867,7 +867,7 @@ def guarded_run(path: str, scan: Scan, explicit: list[str], auto: bool, force: b
         runs.append(("explicit input" if explicit else "no stdin input", explicit))
     last: Optional[RunResult] = None
     for label, lines in runs:
-        last = sandbox_run(path, lines, timeout, allow_proc=force)
+        last = sandbox_run(path, lines, timeout, allow_proc=force, argv=list(getattr(ns, "argv", []) or []))
         flags = _report_run(last, label)
         if flags or last.timed_out:
             break
