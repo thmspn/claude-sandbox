@@ -738,7 +738,66 @@ def scan_source(source: str, path: str = "<string>") -> Scan:
         scan.syntax_error = f"line ?, col ?: {exc}"
         return scan
     _Scanner(tree, scan).run()
+    _offline_hash_crack(source, path, scan)
     return scan
+
+
+_WORDLIST_CAP = 200_000  # lines tried by the offline hash crack
+
+
+def _offline_hash_crack(source: str, path: str, scan) -> None:
+    """Static dictionary attack: source uses hashlib + reads a sibling ``*.hash.bin`` and a
+    sibling wordlist exists -> crack offline with stdlib hashlib, no execution (battery ic-34).
+    Emits the password as a HIGH candidate so --auto-input feeds it first."""
+    import hashlib
+    if "hashlib" not in source:
+        return
+    srcdir = os.path.dirname(os.path.abspath(path)) if path not in ("<string>",) else ""
+    if not srcdir or not os.path.isdir(srcdir):
+        return
+    try:
+        names = os.listdir(srcdir)
+    except OSError:
+        return
+    hashes = []
+    for n in names:
+        p = os.path.join(srcdir, n)
+        if os.path.isfile(p) and ("hash" in n.lower() or n.endswith(".hash.bin")):
+            try:
+                blob = open(p, "rb").read()
+            except OSError:
+                continue
+            if blob:
+                hashes.append((n, blob))
+    if not hashes:
+        return
+    wordlists = [n for n in names
+                 if os.path.isfile(os.path.join(srcdir, n)) and n.endswith(".txt")
+                 and not n.endswith((".enc", ".flag.txt")) and "flag" not in n.lower()]
+    algos = [a for a in ("md5", "sha1", "sha256") if a in source]
+    for wl in wordlists:
+        wpath = os.path.join(srcdir, wl)
+        try:
+            fh = open(wpath, "rb")
+        except OSError:
+            continue
+        with fh:
+            for i, line in enumerate(fh):
+                if i >= _WORDLIST_CAP:
+                    break
+                pw = line.strip()
+                if not pw:
+                    continue
+                for algo in algos:
+                    dig = hashlib.new(algo, pw).digest()
+                    for hn, blob in hashes:
+                        if dig == blob or dig.hex() == blob.decode("latin-1").strip():
+                            scan.derived.append(Candidate(
+                                f"{wl} line {i + 1}: password {pw.decode('latin-1')!r} matches {hn} ({algo})",
+                                "HIGH", "offline hash crack (no execution)", 0))
+                            scan.candidates.insert(0, Candidate(pw.decode("latin-1"), "HIGH",
+                                                                f"cracks {hn} via {algo}", 0))
+                            return
 
 
 def format_scan(scan: Scan) -> str:
