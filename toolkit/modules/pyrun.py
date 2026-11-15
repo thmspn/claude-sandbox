@@ -694,6 +694,7 @@ def format_scan(scan: Scan) -> str:
 SHIM = r'''
 import os, sys, runpy
 target, workdir, allow_proc = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+extra_argv = sys.argv[4:]
 
 def _blocked(*a, **k):
     raise RuntimeError("network blocked by pyrun")
@@ -739,7 +740,7 @@ except ImportError:
 
 os.chdir(workdir)
 sys.path.insert(0, os.path.dirname(target))
-sys.argv = [target]
+sys.argv = [target] + extra_argv
 runpy.run_path(target, run_name="__main__")
 '''
 
@@ -759,7 +760,7 @@ def _read_capped(path: str) -> str:
         return fh.read(OUTPUT_CAP).decode("utf-8", "replace")
 
 
-def sandbox_run(target: str, lines: list[str], timeout: float, allow_proc: bool = False) -> RunResult:
+def sandbox_run(target: str, lines: list[str], timeout: float, allow_proc: bool = False, argv: list[str] | None = None, argv=list(getattr(ns, "argv", []) or [])) -> RunResult:
     """Run ``target`` in the shim (child interpreter, fresh temp cwd, rlimits, no network)."""
     target = os.path.abspath(target)
     base = tempfile.mkdtemp(prefix="pyrun-")
@@ -787,7 +788,7 @@ def sandbox_run(target: str, lines: list[str], timeout: float, allow_proc: bool 
                "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1"}
         timed_out = False
         with open(stdin_p, "rb") as fin, open(out_p, "wb") as fout, open(err_p, "wb") as ferr:
-            proc = subprocess.Popen([sys.executable, "-I", shim, target, work, "1" if allow_proc else "0"],
+            proc = subprocess.Popen([sys.executable, "-I", shim, target, work, "1" if allow_proc else "0"] + list(argv or []),
                                     stdin=fin, stdout=fout, stderr=ferr, env=env, cwd=work,
                                     start_new_session=True)
             try:
@@ -889,6 +890,7 @@ def run(args: list[str]) -> int:
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help=f"wall-clock seconds (default {DEFAULT_TIMEOUT:g})")
     ap.add_argument("--input", action="append", default=[], metavar="TEXT", help="stdin line (repeatable)")
     ap.add_argument("--auto-input", action="store_true", help="also feed Phase-1 derived candidates, then '' and 'password'")
+    ap.add_argument("--argv", action="append", default=[], metavar="ARG", help="extra argv passed to the script (repeatable; battery ic-6 needs -e flag.txt)")
     ns = ap.parse_args(args)
     if (ns.force or ns.auto_input or ns.input) and not ns.run:
         print("note: --force/--input/--auto-input only apply with --run; static scan only", file=sys.stderr)
