@@ -26,6 +26,8 @@ python3 recon.py <module> selftest  # run one module's self-test (`--selftest` a
 python3 recon.py <module> -h        # module usage (exit 0)
 python3 modules/<module>.py [args]  # every module also runs standalone, same CLI
 ```
+The interactive menu is grouped by category with a colored banner and headers (colors only on a TTY with `NO_COLOR` unset; piped and direct CLI output is unchanged).
+
 Exit codes everywhere: `0` success, `1` runtime/analysis failure (bad input, file missing, not found),
 `2` usage error. Self-test output: the global run prints one `[PASS]`/`[FAIL]` line per module and
 `N/N modules passed`, exiting non-zero on any failure.

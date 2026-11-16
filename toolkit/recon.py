@@ -15,7 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from modules import IMPORT_ERRORS, discover  # noqa: E402
+from modules import IMPORT_ERRORS, discover, ui  # noqa: E402
 
 
 def selftest(mods: dict) -> int:
@@ -52,14 +52,45 @@ def run_module(mod, args: list[str]) -> int:
     return rc if isinstance(rc, int) else 0
 
 
+# Display-only grouping for the menu; numbers still follow registry order. Unlisted modules land in "Other".
+CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("REVERSE / PWN", ("triage", "disasm", "elfpatch", "asmeval", "binextras", "pwnhelp",
+                       "shellcode", "gdbkit", "apk", "vaultdoor", "pyrun")),
+    ("CRYPTO / HASH", ("crypto", "hashid", "decode")),
+    ("FORENSICS / STEGO", ("forensics", "stego")),
+    ("WEB", ("webkit",)),
+    ("AUTOMATION", ("go", "autosolve", "revauto", "batch")),
+    ("REFERENCE", ("exploitnotes",)),
+)
+
+
+def print_menu(mods: dict) -> None:
+    """Print the categorized menu. Numbers follow registry order, so choices are unchanged."""
+    names = list(mods)
+    number = {name: i for i, name in enumerate(names, 1)}
+    width = max([len(n) for n in names] + [10]) + 1
+    listed = {n for _, members in CATEGORIES for n in members}
+    groups = [(title, [n for n in members if n in mods]) for title, members in CATEGORIES]
+    groups.append(("OTHER", [n for n in names if n not in listed]))
+    print()
+    print(ui.header("RE TOOLKIT"))
+    for title, members in groups:
+        if not members:
+            continue
+        print(ui.category(title))
+        for name in members:
+            print(ui.menu_row(str(number[name]), name, mods[name].DESCRIPTION, width))
+        print()
+    print(ui.category("SPECIAL"))
+    print(ui.menu_row("q", "quit", "exit the toolkit", width))
+
+
 def menu(mods: dict) -> int:
     """Interactive numbered menu; empty input or 'q' quits."""
     names = list(mods)
+    print(ui.banner())
     while True:
-        print("\n=== RE toolkit ===")
-        for i, name in enumerate(names, 1):
-            print(f"  {i}. {name:<10} {mods[name].DESCRIPTION}")
-        print("  q. quit")
+        print_menu(mods)
         try:
             choice = input("select> ").strip()
         except EOFError:
@@ -71,7 +102,7 @@ def menu(mods: dict) -> int:
         elif choice in mods:
             name = choice
         else:
-            print("invalid choice")
+            print(ui.warning("invalid choice"))
             continue
         try:
             argline = input(f"{name} args> ")
@@ -80,7 +111,7 @@ def menu(mods: dict) -> int:
         try:
             args = shlex.split(argline)
         except ValueError as exc:  # e.g. unbalanced quotes
-            print(f"error: {exc}")
+            print(ui.error(f"error: {exc}"))
             continue
         run_module(mods[name], args)
 
