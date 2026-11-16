@@ -81,7 +81,9 @@ def print_menu(mods: dict) -> None:
         for name in members:
             print(ui.menu_row(str(number[name]), name, mods[name].DESCRIPTION, width))
         print()
-    print(ui.menu_row("q", "quit", "", width))
+    print(ui.category("SPECIAL"))
+    print(ui.menu_row("s", "selftest", "run every module's self-test", width))
+    print(ui.menu_row("0/q", "quit", "exit the toolkit", width))
 
 
 def menu(mods: dict) -> int:
@@ -94,14 +96,17 @@ def menu(mods: dict) -> int:
             choice = input("select> ").strip()
         except EOFError:
             return 0
-        if choice in ("", "q", "quit"):
+        if choice in ("", "0", "q", "quit"):
             return 0
+        if choice in ("s", "selftest"):
+            selftest(mods)
+            continue
         if choice.isdigit() and 1 <= int(choice) <= len(names):
             name = names[int(choice) - 1]
         elif choice in mods:
             name = choice
         else:
-            print(ui.error("invalid choice"))
+            print(ui.warning(f"invalid choice: {choice!r}"))
             continue
         try:
             argline = input(f"{name} args> ")
