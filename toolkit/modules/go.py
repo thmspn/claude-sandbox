@@ -54,10 +54,9 @@ SHOW_LINES = 12                      # captured lines echoed per step without -v
 SKIP_NAMES = {".placeholder", ".ignore"}
 
 # flag-shaped token as written in the task: used on descriptions and on captured step output.
-TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{2,24}\{[^}]{1,200}\}")
-TOKEN_LINE_RE = re.compile(r"[A-Za-z0-9_-]{2,24}\{[^}\r\n]{1,200}\}")
-TOKEN_BYTES_RE = re.compile(rb"[A-Za-z0-9_-]{2,24}\{[\x20-\x7c\x7e]{1,200}\}")
-KNOWN_PREFIX_RE = re.compile(r"^(picoctf|flag|ctf|cybersci|htb|thm|ductf|uiuctf|csaw)\{", re.I)
+TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{1,64}\{[^{}\r\n]{1,200}\}")
+TOKEN_LINE_RE = TOKEN_RE
+TOKEN_BYTES_RE = re.compile(rb"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{1,64}\{[\x20-\x7a\x7c\x7e]{1,200}\}")
 ASM_TEXT_RE = re.compile(
     r"Dump of assembler code|^\s*(?:0x)?[0-9a-f]{4,16}\s*<\+?\d+>:|^\s*[0-9a-f]{4,16}:\s+(?:[0-9a-f]{2}\s)+\s*\w+|"
     r"^\s*\.(?:globl|global|text|section)\b|^\s*[A-Za-z_]\w*:\s*$.*?^\s+(?:mov|push|add|sub|ldr|stp|ret)\b",
@@ -83,6 +82,7 @@ class Candidate:
     text: str
     sources: list[str] = field(default_factory=list)
     order: int = 0
+    speculative_only: bool = False  # only seen among brute-force cipher guesses
 
 
 @dataclass
@@ -181,10 +181,10 @@ class Runner:
         self.text_tokens: list[str] = []    # long base64-looking tokens seen in --text (display-only hint)
 
     # ---- candidates -------------------------------------------------------------------------
-    def add_text(self, text: str, source: str) -> None:
+    def add_text(self, text: str, source: str, speculative: bool = False) -> None:
         """Record every flag-shaped token in ``text`` under ``source``."""
         for m in TOKEN_LINE_RE.finditer(text):
-            self._add(m.group(0), source)
+            self._add(m.group(0), source, speculative)
 
     def add_bytes(self, data: bytes, source: str) -> None:
         """Flag-scan raw bytes and their utf-16-le decode (both byte alignments)."""
@@ -195,10 +195,27 @@ class Runner:
             for m in TOKEN_LINE_RE.finditer(wide):
                 self._add(m.group(0), f"{source} (utf-16-le)")
 
-    def _add(self, flag: str, source: str) -> None:
+    def add_decode_output(self, text: str, source: str) -> None:
+        """Scan default decode results, not its instructional examples.
+
+        Cipher brute-force sections are guesses, unlike literal input and codec
+        results. Keep that evidence even when an unknown prefix looks flag-shaped.
+        Unknown output sections fail closed: no high-score evidence is invented.
+        """
+        section = ""
+        for line in text.splitlines():
+            if line.startswith("== "):
+                section = line
+            if section.startswith(("== auto-decode ==", "== whitespace binary")):
+                self.add_text(line, source)
+            elif section.startswith(("== caesar/rot brute-force", "== single-byte XOR brute-force")):
+                self.add_text(line, source, speculative=True)
+
+    def _add(self, flag: str, source: str, speculative: bool = False) -> None:
         cand = self.cands.get(flag)
         if cand is None:
-            cand = self.cands[flag] = Candidate(flag, [], len(self.cands))
+            cand = self.cands[flag] = Candidate(flag, [], len(self.cands), speculative)
+        cand.speculative_only = cand.speculative_only and speculative
         if source not in cand.sources:
             cand.sources.append(source)
 
@@ -234,7 +251,10 @@ class Runner:
             elif rc != 0:
                 status = f"exit {rc}"
         res = StepResult(full, status, out, time.monotonic() - start)
-        self.add_text(out, full)
+        if module == "decode":
+            self.add_decode_output(out, full)
+        else:
+            self.add_text(out, full)
         for d in extract_derived(module, out, full):
             if not any(d.kind == x.kind and d.text == x.text for x in self.derived):
                 self.derived.append(d)
@@ -421,6 +441,7 @@ def chain_text(run: Runner, text: str) -> None:
     """Challenge-description chain: decode the text, then decode -f each flag-shaped token alone."""
     run.say("=== --text description")
     run.text_only = True
+    run.add_text(text, "literal --text input")
     run.text_tokens = [t for t in dict.fromkeys(B64_TOKEN_RE.findall(text)) if _looks_encoded(t)][:3]
     run.step("decode (text)", "decode", [text], "text")
     seen: set[str] = set()
@@ -448,11 +469,11 @@ def list_inputs(target: str) -> list[str]:
 
 
 def rank(cands: dict[str, Candidate]) -> list[tuple[int, Candidate]]:
-    """Score candidates (mechanical: known prefix, multiple sources, charset) and sort best first."""
+    """Rank by evidence, independent of contest prefix; cipher guesses stay low."""
     scored = []
     for c in cands.values():
         score = 10
-        if KNOWN_PREFIX_RE.match(c.text):
+        if not c.speculative_only:
             score += 100
         score += 5 * (len(c.sources) - 1)
         body = c.text[c.text.index("{") + 1:-1]
@@ -499,7 +520,8 @@ def report(run: Runner) -> int:
         else:
             run.say("(none)")
     for i, (score, c) in enumerate(ranked, 1):
-        run.say(f"{i:>2}. {c.text}   [score {score}]")
+        run.say(f"{i:>2}. {c.text}   [score {score}]" +
+                (" [speculative cipher guess]" if c.speculative_only else ""))
         for s in c.sources:
             run.say(f"      seen by: {s}")
     if run.derived:
