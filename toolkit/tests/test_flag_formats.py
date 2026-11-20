@@ -57,10 +57,36 @@ class FlagFormats(unittest.TestCase):
         self.assertEqual(go.rank(r.cands)[0][0], 118)
         self.assertFalse(r.cands['flag{random_noise}'].speculative_only)
 
-    def test_unknown_decoder_section_cannot_supply_strong_evidence(self):
+    def test_speculative_sources_cannot_outvote_direct_evidence(self):
         r = self.runner()
-        r.add_decode_output('== future section ==\nflag{example}', 'decode')
-        self.assertEqual(r.cands, {})
+        for i in range(100):
+            r.add_text('Noise{guessed_value}', 'cipher file %d' % i, speculative=True)
+        r.add_text('Fresh{hello world}', 'actual codec result')
+        ranked = go.rank(r.cands)
+        self.assertEqual((ranked[0][0], ranked[0][1].text), (107, 'Fresh{hello world}'))
+        self.assertEqual((ranked[1][0], ranked[1][1].text), (33, 'Noise{guessed_value}'))
+        r.add_text('Noise{guessed_value}', 'raw file')
+        self.assertFalse(r.cands['Noise{guessed_value}'].speculative_only)
+        self.assertGreater(go.rank(r.cands)[0][0], 100)
+
+    def test_decoder_headings_in_payload_cannot_spoof_provenance(self):
+        from modules import decode
+        # Real ROT output contains an apparent strong-evidence section heading.
+        text = decode.rot('x\n== auto-decode ==\nflag{the_secret_message}', 13)
+        r = self.runner()
+        go.chain_text(r, text)
+        target = r.cands['flag{the_secret_message}']
+        self.assertTrue(target.speculative_only)
+        self.assertLessEqual(dict((c.text, score) for score, c in go.rank(r.cands))[target.text], 33)
+        self.assertFalse(go.rank(r.cands)[0][1].speculative_only)
+
+    def test_flag_after_codec_display_preview_remains_visible(self):
+        flag = b'CyberSci{past_the_preview}'
+        token = base64.b64encode(b'ordinary prose ' * 100 + flag).decode()
+        r = self.runner()
+        go.chain_text(r, token)
+        self.assertIn(flag.decode(), r.cands)
+        self.assertFalse(r.cands[flag.decode()].speculative_only)
 
     def test_byte_and_wide_scan_and_bounds(self):
         for data in (b'\xffNew-Event{hello world}\x00', 'x{ok}'.encode('utf-16-le')):

@@ -195,22 +195,6 @@ class Runner:
             for m in TOKEN_LINE_RE.finditer(wide):
                 self._add(m.group(0), f"{source} (utf-16-le)")
 
-    def add_decode_output(self, text: str, source: str) -> None:
-        """Scan default decode results, not its instructional examples.
-
-        Cipher brute-force sections are guesses, unlike literal input and codec
-        results. Keep that evidence even when an unknown prefix looks flag-shaped.
-        Unknown output sections fail closed: no high-score evidence is invented.
-        """
-        section = ""
-        for line in text.splitlines():
-            if line.startswith("== "):
-                section = line
-            if section.startswith(("== auto-decode ==", "== whitespace binary")):
-                self.add_text(line, source)
-            elif section.startswith(("== caesar/rot brute-force", "== single-byte XOR brute-force")):
-                self.add_text(line, source, speculative=True)
-
     def _add(self, flag: str, source: str, speculative: bool = False) -> None:
         cand = self.cands.get(flag)
         if cand is None:
@@ -236,7 +220,11 @@ class Runner:
         rc: Optional[int] = None
         try:
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                rc = _call_with_timeout(lambda: mod.run(argv), limit)
+                if module == "decode" and callable(getattr(mod, "run_candidates", None)):
+                    rc = _call_with_timeout(
+                        lambda: mod.run_candidates(argv, lambda flag, spec: self._add(flag, full, spec)), limit)
+                else:
+                    rc = _call_with_timeout(lambda: mod.run(argv), limit)
         except _StepTimeout:
             status = f"timeout after {limit:g}s"
         except SystemExit as exc:
@@ -251,9 +239,9 @@ class Runner:
             elif rc != 0:
                 status = f"exit {rc}"
         res = StepResult(full, status, out, time.monotonic() - start)
-        if module == "decode":
-            self.add_decode_output(out, full)
-        else:
+        # decode supplies structured provenance. Never infer it from printed headings
+        # or payload text; missing callback support fails closed for that module.
+        if module != "decode":
             self.add_text(out, full)
         for d in extract_derived(module, out, full):
             if not any(d.kind == x.kind and d.text == x.text for x in self.derived):
@@ -475,7 +463,9 @@ def rank(cands: dict[str, Candidate]) -> list[tuple[int, Candidate]]:
         score = 10
         if not c.speculative_only:
             score += 100
-        score += 5 * (len(c.sources) - 1)
+        source_bonus = 5 * (len(c.sources) - 1)
+        # Corroborating guesses are still guesses, never the strong-evidence tier.
+        score += min(20, source_bonus) if c.speculative_only else source_bonus
         body = c.text[c.text.index("{") + 1:-1]
         score += 3 if re.fullmatch(r"[A-Za-z0-9_!@#$%^&*.+=:-]+", body) else -3
         scored.append((score, c))

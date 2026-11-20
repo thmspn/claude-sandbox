@@ -35,9 +35,11 @@ select> go       args> --text "pasted challenge text" # a description with no fi
   are unchanged: exit 0 if a flag candidate was found, else 1.)
 - **Candidate scores are not proof:** `go` recognizes `prefix{body}` without a contest-name allowlist
   (prefix: 1-64 ASCII letters/digits/underscores/hyphens; body: 1-200 characters, no braces or line breaks).
-  Literal `--text` tokens and tokens actually printed in module/codec results get +100; speculative
+  Literal `--text` tokens and tokens actually found in module/codec results get +100; speculative
+  Decoder candidates use a structured callback, never headings or truncated previews from the human log.
   ROT/Atbash/XOR guesses do not, even if their prefix says `flag` or `picoCTF`. A simple body gets +3,
-  other bodies -3, on a base of 10; each additional source adds 5. Cipher guesses remain visible and
+  other bodies -3, on a base of 10; each additional source adds 5. Speculative-only source bonuses
+  stop at +20 (maximum speculative score 33), so repeated guesses cannot outrank actual results. Cipher guesses remain visible and
   labelled. An unfamiliar prefix is not evidence of gibberish, and a familiar one is not proof of a flag.
   A ROT-encrypted flag can still look flag-shaped before decryption, so inspect the cipher guesses too;
   scores cannot identify the right rotation from shape alone. Bare hashes, numeric answers and other
