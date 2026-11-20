@@ -438,6 +438,8 @@ def decode_embedded(run: Runner, text: str, tag: str) -> None:
     scan = text.encode("utf-8", "replace")[:DECODE_MAX_BYTES].decode("utf-8", "ignore")
     for match in B64_TOKEN_RE.finditer(scan):
         token = match.group(0)
+        if match.end() == len(scan) and len(scan) < len(text) and text[len(scan)] in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-":
+            continue  # the 200KiB boundary cut through a longer token
         if token in seen:
             continue
         seen.add(token)
@@ -578,6 +580,13 @@ def run(args: list[str]) -> int:
     p.add_argument("--step-timeout", type=float, default=DEFAULT_STEP_TIMEOUT, help="seconds per step (default 20)")
     p.add_argument("--budget", type=float, default=DEFAULT_BUDGET, help="total seconds (default 180)")
     p.add_argument("-v", "--verbose", action="store_true", help="echo all captured step output")
+    # --text owns the following argument even when it begins with '-'.
+    # Preserve the usual missing-value error when no following argument exists.
+    args = list(args)
+    for i, arg in enumerate(args[:-1]):
+        if arg in ("--text", "-t"):
+            args[i:i + 2] = [arg + "=" + args[i + 1]]
+            break
     try:
         ns = p.parse_args(args)
     except SystemExit as exc:

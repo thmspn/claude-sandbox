@@ -65,6 +65,22 @@ class EmbeddedTokens(unittest.TestCase):
         self.assertNotIn('[PASS]', r.results[0].output)
         self.assertEqual(r.results[0].status, 'ok')
 
+    def test_outer_cli_accepts_option_like_text(self):
+        import contextlib
+        import io
+        for args in (['--text', '--selftest'], ['-t', '--selftest'], ['--text=--selftest']):
+            with self.subTest(args=args), contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = go.run(args)
+            self.assertEqual(rc, 1)  # analyzed, no flag; not argparse's exit 2
+            self.assertIn('== FLAG CANDIDATES ==', out.getvalue())
+            self.assertNotIn('[PASS]', out.getvalue())
+
+    def test_scan_clip_does_not_accept_partial_oversize_token(self):
+        r = self.runner()
+        prefix = ' ' * (go.DECODE_MAX_BYTES - 4000)
+        go.decode_embedded(r, prefix + 'A' * 5000 + ' tail', 'text')
+        self.assertEqual(r.results, [])
+
     def test_oversize_token_is_not_scanned_as_a_suffix(self):
         r = self.runner()
         go.decode_embedded(r, 'prefix ' + 'A' * 5000 + ' suffix', 'text')
