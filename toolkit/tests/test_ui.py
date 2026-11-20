@@ -90,9 +90,11 @@ class MenuText(unittest.TestCase):
         out = run_menu("q\n").stdout
         self.assertLess(out.index("START HERE"), out.index("REVERSE / PWN"))
         for needle in ("select> go", "select> batch", "--text", "module name or number", "arguments only, not the command",
-                       "Quote paths with spaces", "-h", "candidates to verify", "No candidate is NOT success"):
+                       "Quote paths with spaces", "-h", "candidates to verify", "No candidate is NOT success",
+                       "ONLY an encoded token", "only waits for your choice", "go on a .py file",
+                       "review the code first", "not a security boundary", "ok only means the tool ran", "-v"):
             self.assertIn(needle, out)
-        for line in ui.start_here().splitlines():
+        for line in (ui.start_here() + "\n" + ui.start_here_short()).splitlines():
             self.assertLessEqual(len(line), ui.RULE_WIDTH, line)
 
     def test_no_status_column_and_numbers_unchanged(self) -> None:
@@ -113,9 +115,16 @@ class MenuText(unittest.TestCase):
                 self.assertIn(f"args> {example}", out)
                 self.assertIn("usage:", out)  # -h still prints the module's own usage
 
-    def test_start_here_shown_once_per_session(self) -> None:
-        out = run_menu("triage\n\nq\n").stdout
+    def test_start_here_shown_once_per_session_then_compact_reminder(self) -> None:
+        out = run_menu("triage\n\nnope\nq\n").stdout
         self.assertEqual(out.count("START HERE"), 1)
+        self.assertEqual(out.count("REMINDER"), 2)  # one per redraw after the first
+        self.assertNotIn("Nothing runs by itself", out)
+
+    def test_go_warning_precedes_go_args_prompt_only(self) -> None:
+        out = run_menu("go\n\nq\n").stdout
+        self.assertLess(out.index("RUNS it in a guarded sandbox"), out.index("go args>"))
+        self.assertNotIn("RUNS it in a guarded sandbox", run_menu("triage\n\nq\n").stdout)
 
     def test_args_prompt_is_unchanged(self) -> None:
         self.assertIn("go args> ", run_menu("go\n\n").stdout)
@@ -135,6 +144,34 @@ class MenuFlows(unittest.TestCase):
     def test_invalid_choice_then_continue(self) -> None:
         out = run_menu("nope\n999\n0\nq\n").stdout
         self.assertEqual(out.count("invalid choice"), 3)
+        self.assertIn("name", out)
+        self.assertIn("number", out)
+        self.assertIn("q to quit", out)
+
+    def test_repeated_module_name_gets_hint_and_args_unchanged(self) -> None:
+        r = run_menu("triage\ntriage no_such_file_here\nq\n")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("typed the module name 'triage'", r.stdout)
+        self.assertIn("no_such_file_here", r.stdout + r.stderr)  # the module still saw and reported the arguments
+        self.assertNotIn("typed the module name", run_menu("triage\nno_such_file_here\nq\n").stdout)
+
+    def test_split_path_hint_and_module_errors_not_suppressed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "my folder", "chall bin")
+            os.makedirs(os.path.dirname(path))
+            with open(path, "wb") as fh:
+                fh.write(b"hello\n")
+            r = run_menu(f"triage\n{path} --no-strings\nq\n")
+            self.assertIn("quote the ENTIRE path", r.stdout)
+            self.assertTrue(r.stderr.strip() or "error" in r.stdout.lower())  # module's own error still visible
+            r2 = run_menu(f'triage\n"{path}" --no-strings\nq\n')
+            self.assertNotIn("quote the ENTIRE path", r2.stdout)
+
+    def test_path_hint_unit(self) -> None:
+        self.assertEqual(recon.path_hint("a b", ["a", "b"], 0), "")
+        self.assertEqual(recon.path_hint('"a b"', ["a b", "c"], 2), "")
+        self.assertIn("quote", recon.path_hint("x y", ["x", "y"], 2))
+        self.assertEqual(recon.path_hint("triage y", ["triage", "y"], 2, "triage"), "")
 
     def test_unbalanced_quote_reports_error_and_returns_to_menu(self) -> None:
         r = run_menu('triage\n"oops\nq\n')

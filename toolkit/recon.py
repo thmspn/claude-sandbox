@@ -67,7 +67,7 @@ CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
 def print_menu(mods: dict, guide: bool = True) -> None:
     """Print the categorized menu. Numbers follow registry order, so choices are unchanged.
 
-    ``guide`` adds the START HERE panel ahead of the module categories (shown on first display only).
+    The full START HERE panel is shown on first display; later redraws show a compact reminder.
     """
     names = list(mods)
     number = {name: i for i, name in enumerate(names, 1)}
@@ -77,9 +77,8 @@ def print_menu(mods: dict, guide: bool = True) -> None:
     groups.append(("OTHER", [n for n in names if n not in listed]))
     print()
     print(ui.header("RE TOOLKIT"))
-    if guide:
-        print(ui.start_here())
-        print()
+    print(ui.start_here() if guide else ui.start_here_short())
+    print()
     for title, members in groups:
         if not members:
             continue
@@ -89,6 +88,20 @@ def print_menu(mods: dict, guide: bool = True) -> None:
         print()
     print(ui.category("SPECIAL"))
     print(ui.menu_row("q", "quit", "exit the toolkit", width))
+
+
+def path_hint(argline: str, args: list[str], rc: int, module: str = "") -> str:
+    """Display-only advice after a failed run when an unquoted path with spaces may have been split."""
+    if rc == 0 or len(args) < 2 or '"' in argline or "'" in argline:
+        return ""
+    for i in range(len(args)):
+        for j in range(i + 1, len(args)):
+            joined = " ".join(args[i:j + 1])
+            if os.path.exists(joined):
+                return f'"{joined}" exists but was split at the spaces: quote the ENTIRE path, e.g. "{joined}"'
+    if rc == 2 and args[0] != module:
+        return 'hint: if a path contains spaces, quote the ENTIRE path, e.g. "my folder/chall bin"'
+    return ""
 
 
 def menu(mods: dict) -> int:
@@ -110,9 +123,11 @@ def menu(mods: dict) -> int:
         elif choice in mods:
             name = choice
         else:
-            print(ui.warning("invalid choice"))
+            print(ui.warning("invalid choice: type a module name (e.g. go) or its number from the list, or q to quit"))
             continue
         print(ui.module_guide(name, mods[name].DESCRIPTION))
+        if name == "go":
+            print(ui.go_warning())
         try:
             argline = input(f"{name} args> ")
         except EOFError:
@@ -122,7 +137,13 @@ def menu(mods: dict) -> int:
         except ValueError as exc:  # e.g. unbalanced quotes
             print(ui.error(f"error: {exc}"))
             continue
-        run_module(mods[name], args)
+        if args and args[0] == name:
+            print(ui.info(f"hint: you typed the module name '{name}' at args>. It is already selected, so args> takes "
+                          "arguments only. Submitted as written; if it fails, retry without it."))
+        rc = run_module(mods[name], args)
+        hint = path_hint(argline, args, rc, name)
+        if hint:
+            print(ui.info(hint))
 
 
 def main(argv: list[str]) -> int:

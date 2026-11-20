@@ -139,21 +139,43 @@ GUIDE: dict[str, tuple[str, str]] = {
 
 
 def start_here() -> str:
-    """The START HERE panel: the three easiest entry points and how the two prompts work."""
+    """The START HERE panel: the three easiest entry points, the two prompts, and the safety facts."""
     lines = [
         category("START HERE"),
         "  One file:     select> go       then  args> chall.bin",
         "  A folder:     select> batch    then  args> challenge_folder",
         '  Pasted text:  select> go       then  args> --text "paste the challenge text"',
-        "  select> takes a module name or number.",
+        "                (paste ONLY an encoded token; prose around it hides it)",
+        "  select> takes a module name or number (q quits).",
         "  args> takes arguments only, not the command (type  go chall  and it fails).",
         '  Quote paths with spaces: "my folder/chall bin".',
         "  Type -h at args> to see that module's usage.",
         "  Results are candidates to verify, not answers.",
         "  No candidate is NOT success: it means nothing was found. Try another module.",
-        "  Nothing runs by itself and nothing uses the network.",
+        "  A step marked ok only means the tool ran. Add -v to see cut-off output.",
+        "  The menu only waits for your choice. Nothing uses the network.",
+        "  CAUTION: go on a .py file (or a folder containing .py) runs guarded Python:",
+        "  review the code first; non-hostile CTF scripts only;",
+        "  the sandbox is not a security boundary; no network.",
     ]
     return "\n".join(lines)
+
+
+GO_PY_WARNING = "review the code first; non-hostile CTF scripts only; sandbox is not a security boundary."
+
+
+def start_here_short() -> str:
+    """Compact reminder shown on later menu redraws."""
+    return (f"{category('REMINDER')}\n"
+            "  go <file> | batch <folder> | go --text \"...\"   args> = arguments only\n"
+            "  quote paths with spaces; results are candidates; ok = tool ran, not solved\n"
+            "  -v = full output; go on .py runs guarded Python (review code first)")
+
+
+def go_warning() -> str:
+    """Warning printed before the go args prompt."""
+    return warning("go on a .py file (or a folder with .py files) RUNS it in a guarded sandbox: " + GO_PY_WARNING
+                   + " No network.")
 
 
 def module_guide(name: str, desc: str) -> str:
