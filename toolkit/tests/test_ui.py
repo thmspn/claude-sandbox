@@ -148,6 +148,20 @@ class MenuFlows(unittest.TestCase):
         self.assertIn("number", out)
         self.assertIn("q to quit", out)
 
+    def test_help_and_question_mark_recall_start_here(self) -> None:
+        for word in ("help", "?"):
+            out = run_menu(f"{word}\nq\n")
+            self.assertEqual(out.returncode, 0)
+            self.assertIn("invalid choice", out.stdout)
+            self.assertEqual(out.stdout.count("START HERE"), 2, word)
+
+    def test_batch_tip_only_in_interactive_menu(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            out = run_menu(f"batch\n{shlex.quote(d)}\nq\n").stdout
+        self.assertIn("quick first look", out)
+        self.assertIn("review the code first", out)
+        self.assertNotIn("quick first look", run_menu("triage\nq\n").stdout)
+
     def test_repeated_module_name_gets_hint_and_args_unchanged(self) -> None:
         r = run_menu("triage\ntriage no_such_file_here\nq\n")
         self.assertEqual(r.returncode, 0)

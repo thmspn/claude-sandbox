@@ -152,7 +152,7 @@ def start_here() -> str:
         "  Type -h at args> to see that module's usage.",
         "  Results are candidates to verify, not answers.",
         "  No candidate is NOT success: it means nothing was found. Try another module.",
-        "  A step marked ok only means the tool ran. Add -v to see cut-off output.",
+        "  A step ok only means the tool ran. go -v shows cut-off output.",
         "  The menu only waits for your choice. Nothing uses the network.",
         "  CAUTION: go on a .py file (or a folder containing .py) runs guarded Python:",
         "  review the code first; non-hostile CTF scripts only;",
@@ -169,7 +169,13 @@ def start_here_short() -> str:
     return (f"{category('REMINDER')}\n"
             "  go <file> | batch <folder> | go --text \"...\"   args> = arguments only\n"
             "  quote paths with spaces; results are candidates; ok = tool ran, not solved\n"
-            "  -v = full output; go on .py runs guarded Python (review code first)")
+            "  go -v = full output; go on .py runs guarded Python (review code first)")
+
+
+def batch_tip() -> str:
+    """Tip printed after an interactive batch run (display only)."""
+    return info("tip: the batch table is a quick first look; truncated cells are previews. Use go on a chosen file "
+                "for deeper analysis (for Python files, review the code first).")
 
 
 def go_warning() -> str:

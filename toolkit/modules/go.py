@@ -466,11 +466,11 @@ NEXT_STEPS = {
     "java": "vaultdoor <file> (VaultDoor*.java checkers), decode, crypto",
     "asm": "asmeval <file> --func NAME --arg N (see its -h); numeric register values may need wrapping in the contest's flag format by hand",
     "py": "pyrun <file> (read-only scan, no --run), revauto <file>, decode",
-    "elf": "autosolve <file> -v, disasm entry <file>, revauto <file> --deep, binextras",
+    "elf": "autosolve <file> --deep (or autosolve -h), disasm entry <file>, revauto <file> --deep, binextras",
     "pcap": "forensics <file> --http, stego, decode",
     "blob": "stego <file> --lsb, forensics <file>, binextras",
     "archive": "binextras extract (look at every member), forensics, decode",
-    "text": "decode <file>, crypto (classic ciphers), hashid id <hash>",
+    "text": "decode -f <file>, crypto (classic ciphers), hashid id <hash>",
 }
 
 
@@ -485,7 +485,7 @@ def _next_step_hint(run: Runner) -> list[str]:
         lines.append('    token:  go --text "<token only>"   or   decode "<token>"')
         for t in run.text_tokens:
             lines.append(f"    possible encoded token: {t[:60]}{'...' if len(t) > 60 else ''}   (not decoded here; display-only hint)")
-    lines.append("  - rerun with -v to see the step output that was cut off; read the whole log, not just this summary.")
+    lines.append("  - rerun go with -v (a go option, not for other modules) to see the step output that was cut off; read the whole log, not just this summary.")
     return lines
 
 

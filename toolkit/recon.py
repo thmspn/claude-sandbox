@@ -123,6 +123,8 @@ def menu(mods: dict) -> int:
         elif choice in mods:
             name = choice
         else:
+            if choice.lower() in ("help", "?"):
+                print(ui.start_here())
             print(ui.warning("invalid choice: type a module name (e.g. go) or its number from the list, or q to quit"))
             continue
         print(ui.module_guide(name, mods[name].DESCRIPTION))
@@ -141,6 +143,8 @@ def menu(mods: dict) -> int:
             print(ui.info(f"hint: you typed the module name '{name}' at args>. It is already selected, so args> takes "
                           "arguments only. Submitted as written; if it fails, retry without it."))
         rc = run_module(mods[name], args)
+        if name == "batch":
+            print(ui.batch_tip())
         hint = path_hint(argline, args, rc, name)
         if hint:
             print(ui.info(hint))

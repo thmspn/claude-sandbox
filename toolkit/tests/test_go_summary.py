@@ -93,6 +93,14 @@ class DerivedSummary(unittest.TestCase):
         self.assertIn("autosolve", text)
         self.assertIn("pyrun", text)
         self.assertIn("(none)", text)
+        self.assertIn("autosolve <file> --deep", text)
+        self.assertNotIn("autosolve <file> -v", text)
+        self.assertIn("rerun go with -v", text)
+
+    def test_text_kind_suggests_decode_dash_f(self) -> None:
+        rc, text, _ = summary({}, [("x", "missing")], kinds=["text"])
+        self.assertIn("decode -f <file>", text)
+        self.assertNotIn("decode <file>", text)
 
     def test_text_hint_names_token_only_and_does_not_claim_prose_understanding(self) -> None:
         rc, text, _ = summary({}, [], text_only=True, text_tokens=["aGVsbG8gd29ybGQxMjM="])
