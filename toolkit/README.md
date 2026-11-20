@@ -15,6 +15,25 @@ process; it runs in a timeout-bounded child) and absent by default. Install it *
 `pip install angr`, or on Kali (PEP 668) `python3 -m venv ~/angr-venv && ~/angr-venv/bin/pip install angr` and then run the
 toolkit with `~/angr-venv/bin/python3 toolkit/recon.py ...`. Without it `autosolve` prints one skip line and everything else is unchanged.
 
+## Beginner quick start
+No knowledge of the scripts is needed. From `toolkit/`, run `python3 recon.py` and read the **START HERE** panel:
+```
+select> go       args> chall.bin                      # one file: detect type, run the right tools
+select> batch    args> challenge_folder               # a whole folder, one table
+select> go       args> --text "pasted challenge text" # a description with no file
+```
+- `select>` takes a module name or number; `args>` takes arguments only, never the module name.
+- Quote paths with spaces: `"my folder/chall bin"`. `-h` at `args>` shows that module's usage.
+- After you pick a module the menu shows what it does and a working example for `args>`.
+- Everything printed is a **candidate to verify**. "No candidate" is not success: it means nothing was found,
+  so try another module. The menu never runs anything on its own, never touches the network, installs nothing.
+
+Honest limits: `asmeval` only evaluates a whitelist of instructions (it models register widths such as
+`eax`/`ax`/`al`, but not arbitrary code); unknown inputs, outside calls or unsupported instructions give a
+**PARTIAL** result, not a guess. `pyrun` reads a script before anything runs; `--run` is refused when the scan
+finds network/subprocess/obfuscation, executes in a no-network sandbox with resource limits, and is a guard rail
+for non-hostile challenge scripts, not a security boundary. Review unknown scripts before using `--run`.
+
 ## Run
 Run from the `toolkit/` directory (or prefix paths with `toolkit/`).
 ```
@@ -27,6 +46,7 @@ python3 recon.py <module> -h        # module usage (exit 0)
 python3 modules/<module>.py [args]  # every module also runs standalone, same CLI
 ```
 The interactive menu is grouped by category with a colored banner and headers (colors only on a TTY with `NO_COLOR` unset; piped and direct CLI output is unchanged).
+UI regression tests (stdlib `unittest`, offline): `python3 -m unittest discover -s tests` from `toolkit/`.
 
 Exit codes everywhere: `0` success, `1` runtime/analysis failure (bad input, file missing, not found),
 `2` usage error. Self-test output: the global run prints one `[PASS]`/`[FAIL]` line per module and

@@ -107,3 +107,60 @@ def warning(msg: str) -> str:
 def info(msg: str) -> str:
     """Blue ``ℹ`` status line."""
     return _status("ℹ", "[i]", BLUE, msg)
+
+
+# --------------------------------------------------------------------------- beginner guidance
+# name -> (plain-English purpose, example for the ``args>`` prompt). Examples are arguments only (no module name);
+# tests/test_ui.py runs every one through the real module parser. File names are placeholders to replace.
+GUIDE: dict[str, tuple[str, str]] = {
+    "apk": ("Look inside an Android .apk: manifest, strings, certificates.", "app.apk --strings"),
+    "asmeval": ("Work out what a pasted assembly listing returns for given inputs.", "func.S --func check --arg 5"),
+    "autosolve": ("Find the 'correct/wrong' check in an ELF and try to derive the input it wants.", "chall"),
+    "batch": ("Run quick triage on every file in a folder and show one table.", "challenge_folder --quick"),
+    "binextras": ("Small binary helpers: cyclic patterns, ROP gadgets, hexdump, file carving.", "hexdump chall -l 64"),
+    "crypto": ("Attack classic ciphers (XOR, Vigenere, substitution) and simple RSA.", 'freq "Uryyb Jbeyq"'),
+    "decode": ("Decode or encode base64/hex/url/rot and guess layered encodings.", '"SGVsbG8gV29ybGQ="'),
+    "disasm": ("Disassemble an ELF: entry point, ranges, calls and strings.", "entry chall 10"),
+    "elfpatch": ("Write a patched COPY of an ELF (flip a jump, NOP bytes). Never edits the input.", "flip chall --at 0x401136 -o chall_patched"),
+    "exploitnotes": ("Read short offline notes on common pwn techniques.", "ret2win"),
+    "forensics": ("Inspect a packet capture or file: streams, HTTP objects, metadata, magic bytes.", "capture.pcap --http"),
+    "gdbkit": ("Look up gdb/gef command recipes and generate gdb batch scripts.", "find breakpoint"),
+    "go": ("Easiest start: detect the input type, run the right tools, print ranked candidates.", "chall"),
+    "hashid": ("Guess a hash's type; try a local wordlist against it.", "id 5f4dcc3b5aa765d61d8327deb882cf99"),
+    "pwnhelp": ("Exploit arithmetic: pack/unpack addresses, libc base, format-string offsets.", "pack 0x401136"),
+    "pyrun": ("Read a Python challenge script safely; --run only in a no-network sandbox.", "script.py"),
+    "revauto": ("Auto-analyze a script or binary: unwrap obfuscation layers, list strings and flags.", "chall.py"),
+    "shellcode": ("Check shellcode for bad bytes, XOR-encode it, convert between formats.", "badchars 00112233 --format hex"),
+    "stego": ("Look for data hidden in an image (appended bytes, LSBs, palette).", "image.png --lsb"),
+    "triage": ("First look at any file: type, hashes, strings, entropy, ELF protections.", "chall"),
+    "vaultdoor": ("Solve picoCTF VaultDoor*.java password checkers without running Java.", "VaultDoor3.java"),
+    "webkit": ("Offline web helpers: decode JWTs and cookies, build fuzz wordlists.", "cookie b64decode SGVsbG8"),
+}
+
+
+def start_here() -> str:
+    """The START HERE panel: the three easiest entry points and how the two prompts work."""
+    lines = [
+        category("START HERE"),
+        "  One file:     select> go       then  args> chall.bin",
+        "  A folder:     select> batch    then  args> challenge_folder",
+        '  Pasted text:  select> go       then  args> --text "paste the challenge text"',
+        "  select> takes a module name or number.",
+        "  args> takes arguments only, not the command (type  go chall  and it fails).",
+        '  Quote paths with spaces: "my folder/chall bin".',
+        "  Type -h at args> to see that module's usage.",
+        "  Results are candidates to verify, not answers.",
+        "  No candidate is NOT success: it means nothing was found. Try another module.",
+        "  Nothing runs by itself and nothing uses the network.",
+    ]
+    return "\n".join(lines)
+
+
+def module_guide(name: str, desc: str) -> str:
+    """Purpose + example shown after a module is selected, before the ``args>`` prompt."""
+    purpose, example = GUIDE.get(name, (desc, ""))
+    out = [info(purpose)]
+    if example:
+        out.append(f"  example  args> {paint(example, WHITE)}")
+    out.append("  (-h shows usage; arguments only, not the module name)")
+    return "\n".join(out)

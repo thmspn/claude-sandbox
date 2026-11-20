@@ -64,8 +64,11 @@ CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-def print_menu(mods: dict) -> None:
-    """Print the categorized menu. Numbers follow registry order, so choices are unchanged."""
+def print_menu(mods: dict, guide: bool = True) -> None:
+    """Print the categorized menu. Numbers follow registry order, so choices are unchanged.
+
+    ``guide`` adds the START HERE panel ahead of the module categories (shown on first display only).
+    """
     names = list(mods)
     number = {name: i for i, name in enumerate(names, 1)}
     width = max([len(n) for n in names] + [10]) + 1
@@ -74,6 +77,9 @@ def print_menu(mods: dict) -> None:
     groups.append(("OTHER", [n for n in names if n not in listed]))
     print()
     print(ui.header("RE TOOLKIT"))
+    if guide:
+        print(ui.start_here())
+        print()
     for title, members in groups:
         if not members:
             continue
@@ -89,8 +95,10 @@ def menu(mods: dict) -> int:
     """Interactive numbered menu; empty input or 'q' quits."""
     names = list(mods)
     print(ui.banner())
+    first = True
     while True:
-        print_menu(mods)
+        print_menu(mods, guide=first)
+        first = False
         try:
             choice = input("select> ").strip()
         except EOFError:
@@ -104,6 +112,7 @@ def menu(mods: dict) -> int:
         else:
             print(ui.warning("invalid choice"))
             continue
+        print(ui.module_guide(name, mods[name].DESCRIPTION))
         try:
             argline = input(f"{name} args> ")
         except EOFError:
